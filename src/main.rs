@@ -20,7 +20,6 @@ use tokio::sync::{broadcast, RwLock};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{error, info};
-use tracing_subscriber;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
