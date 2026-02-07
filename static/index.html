@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screen Time Monitor</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            color: #2c3e50;
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .user-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .user-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .user-header {
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+        }
+
+        .user-name {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .host-name {
+            font-size: 0.9em;
+            color: #6c757d;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .stat {
+            text-align: center;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .stat-label {
+            font-size: 0.8em;
+            color: #6c757d;
+            margin-top: 4px;
+        }
+
+        .activity-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .activity-item {
+            padding: 8px;
+            border-left: 3px solid #007bff;
+            margin-bottom: 8px;
+            background: #f8f9fa;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .activity-process {
+            font-weight: bold;
+            color: #495057;
+        }
+
+        .activity-window {
+            font-size: 0.9em;
+            color: #6c757d;
+        }
+
+        .activity-time {
+            font-size: 0.8em;
+            color: #6c757d;
+        }
+
+        .duration {
+            color: #28a745;
+            font-weight: bold;
+        }
+
+        .no-data {
+            text-align: center;
+            color: #6c757d;
+            font-style: italic;
+            padding: 40px;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .updating {
+            animation: pulse 1s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Screen Time Monitor</h1>
+            <span id="connection-status" class="status disconnected">Disconnected</span>
+            <span id="last-update">No data received</span>
+        </div>
+
+        <div id="user-container" class="user-grid">
+            <div class="no-data">Waiting for screen time data...</div>
+        </div>
+    </div>
+
+    <script>
+        class ScreenTimeMonitor {
+            constructor() {
+                this.ws = null;
+                this.data = {};
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                this.reconnectDelay = 1000;
+                
+                this.connect();
+                this.startPeriodicUpdate();
+            }
+
+            connect() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}/ws`;
+                
+                try {
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        console.log('WebSocket connected');
+                        this.updateConnectionStatus(true);
+                        this.reconnectAttempts = 0;
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        const screenTimeEvent = JSON.parse(event.data);
+                        this.updateData(screenTimeEvent);
+                    };
+                    
+                    this.ws.onclose = () => {
+                        console.log('WebSocket disconnected');
+                        this.updateConnectionStatus(false);
+                        this.attemptReconnect();
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        this.updateConnectionStatus(false);
+                    };
+                } catch (error) {
+                    console.error('Failed to create WebSocket:', error);
+                    this.updateConnectionStatus(false);
+                    this.attemptReconnect();
+                }
+            }
+
+            attemptReconnect() {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+                    
+                    setTimeout(() => {
+                        this.connect();
+                    }, this.reconnectDelay * this.reconnectAttempts);
+                } else {
+                    console.log('Max reconnection attempts reached');
+                }
+            }
+
+            updateConnectionStatus(connected) {
+                const statusElement = document.getElementById('connection-status');
+                if (connected) {
+                    statusElement.textContent = 'Connected';
+                    statusElement.className = 'status connected';
+                } else {
+                    statusElement.textContent = 'Disconnected';
+                    statusElement.className = 'status disconnected';
+                }
+            }
+
+            updateData(event) {
+                const key = `${event.host}:${event.user}`;
+                
+                if (!this.data[key]) {
+                    this.data[key] = {
+                        host: event.host,
+                        user: event.user,
+                        events: [],
+                        totalTime: 0
+                    };
+                }
+                
+                this.data[key].events.unshift(event);
+                if (this.data[key].events.length > 50) {
+                    this.data[key].events.pop();
+                }
+                
+                this.data[key].totalTime += event.duration_seconds;
+                
+                this.render();
+                this.updateLastUpdate();
+            }
+
+            render() {
+                const container = document.getElementById('user-container');
+                
+                if (Object.keys(this.data).length === 0) {
+                    container.innerHTML = '<div class="no-data">Waiting for screen time data...</div>';
+                    return;
+                }
+                
+                container.innerHTML = '';
+                
+                Object.values(this.data).forEach(userData => {
+                    const card = this.createUserCard(userData);
+                    container.appendChild(card);
+                });
+            }
+
+            createUserCard(userData) {
+                const card = document.createElement('div');
+                card.className = 'user-card';
+                
+                const recentEvents = userData.events.slice(0, 5);
+                const totalHours = Math.floor(userData.totalTime / 3600);
+                const totalMinutes = Math.floor((userData.totalTime % 3600) / 60);
+                
+                card.innerHTML = `
+                    <div class="user-header">
+                        <div class="user-name">${userData.user}</div>
+                        <div class="host-name">${userData.host}</div>
+                    </div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-value">${totalHours}h ${totalMinutes}m</div>
+                            <div class="stat-label">Total Time</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${userData.events.length}</div>
+                            <div class="stat-label">Activities</div>
+                        </div>
+                    </div>
+                    <div class="activity-list">
+                        ${recentEvents.map(event => `
+                            <div class="activity-item">
+                                <div class="activity-process">${event.process_name || 'Unknown'}</div>
+                                ${event.window_title ? `<div class="activity-window">${event.window_title}</div>` : ''}
+                                <div class="activity-time">
+                                    <span class="duration">${this.formatDuration(event.duration_seconds)}</span>
+                                    • ${new Date(event.timestamp).toLocaleTimeString()}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+                
+                return card;
+            }
+
+            formatDuration(seconds) {
+                if (seconds < 60) {
+                    return `${seconds}s`;
+                } else if (seconds < 3600) {
+                    const minutes = Math.floor(seconds / 60);
+                    const remainingSeconds = seconds % 60;
+                    return `${minutes}m ${remainingSeconds}s`;
+                } else {
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    return `${hours}h ${minutes}m`;
+                }
+            }
+
+            updateLastUpdate() {
+                const element = document.getElementById('last-update');
+                element.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+            }
+
+            startPeriodicUpdate() {
+                setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.render();
+                    }
+                }, 30000);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            new ScreenTimeMonitor();
+        });
+    </script>
+</body>
+</html>
