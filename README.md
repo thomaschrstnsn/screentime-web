@@ -8,7 +8,7 @@ A web application built with Rust, Axum, and HTMX that displays real-time screen
 - **NATS Integration**: Subscribes to `time.obs.<host>.<user>` subjects
 - **Responsive UI**: Clean, modern interface using HTMX
 - **User/Host Grouping**: Organizes data by user and host combinations
-- **Activity Tracking**: Shows process names, window titles, and durations
+- **Usage Statistics**: Shows left/spent time for day, week, month, and balance
 
 ## Requirements
 
@@ -65,9 +65,11 @@ The application expects JSON messages on subjects matching `time.obs.<host>.<use
 
 ```json
 {
-  "duration_seconds": 3600,
-  "process_name": "chrome",
-  "window_title": "GitHub - Developing awesome code"
+  "left_day": 866,
+  "spent_balance": 6334,
+  "spent_month": 49090,
+  "spent_week": 41889,
+  "spent_day": 6334
 }
 ```
 

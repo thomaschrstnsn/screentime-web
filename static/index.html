@@ -89,9 +89,9 @@
 
         .stats {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
             gap: 10px;
-            margin-bottom: 15px;
+            margin-bottom: 0;
         }
 
         .stat {
@@ -102,7 +102,7 @@
         }
 
         .stat-value {
-            font-size: 1.5em;
+            font-size: 1.2em;
             font-weight: bold;
             color: #007bff;
         }
@@ -111,39 +111,6 @@
             font-size: 0.8em;
             color: #6c757d;
             margin-top: 4px;
-        }
-
-        .activity-list {
-            max-height: 200px;
-            overflow-y: auto;
-        }
-
-        .activity-item {
-            padding: 8px;
-            border-left: 3px solid #007bff;
-            margin-bottom: 8px;
-            background: #f8f9fa;
-            border-radius: 0 4px 4px 0;
-        }
-
-        .activity-process {
-            font-weight: bold;
-            color: #495057;
-        }
-
-        .activity-window {
-            font-size: 0.9em;
-            color: #6c757d;
-        }
-
-        .activity-time {
-            font-size: 0.8em;
-            color: #6c757d;
-        }
-
-        .duration {
-            color: #28a745;
-            font-weight: bold;
         }
 
         .no-data {
@@ -252,21 +219,7 @@
             updateData(event) {
                 const key = `${event.host}:${event.user}`;
                 
-                if (!this.data[key]) {
-                    this.data[key] = {
-                        host: event.host,
-                        user: event.user,
-                        events: [],
-                        totalTime: 0
-                    };
-                }
-                
-                this.data[key].events.unshift(event);
-                if (this.data[key].events.length > 50) {
-                    this.data[key].events.pop();
-                }
-                
-                this.data[key].totalTime += event.duration_seconds;
+                this.data[key] = event;
                 
                 this.render();
                 this.updateLastUpdate();
@@ -292,10 +245,6 @@
                 const card = document.createElement('div');
                 card.className = 'user-card';
                 
-                const recentEvents = userData.events.slice(0, 5);
-                const totalHours = Math.floor(userData.totalTime / 3600);
-                const totalMinutes = Math.floor((userData.totalTime % 3600) / 60);
-                
                 card.innerHTML = `
                     <div class="user-header">
                         <div class="user-name">${userData.user}</div>
@@ -303,25 +252,25 @@
                     </div>
                     <div class="stats">
                         <div class="stat">
-                            <div class="stat-value">${totalHours}h ${totalMinutes}m</div>
-                            <div class="stat-label">Total Time</div>
+                            <div class="stat-value">${this.formatDuration(userData.left_day)}</div>
+                            <div class="stat-label">Left Today</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${userData.events.length}</div>
-                            <div class="stat-label">Activities</div>
+                            <div class="stat-value">${this.formatDuration(userData.spent_day)}</div>
+                            <div class="stat-label">Spent Today</div>
                         </div>
-                    </div>
-                    <div class="activity-list">
-                        ${recentEvents.map(event => `
-                            <div class="activity-item">
-                                <div class="activity-process">${event.process_name || 'Unknown'}</div>
-                                ${event.window_title ? `<div class="activity-window">${event.window_title}</div>` : ''}
-                                <div class="activity-time">
-                                    <span class="duration">${this.formatDuration(event.duration_seconds)}</span>
-                                    • ${new Date(event.timestamp).toLocaleTimeString()}
-                                </div>
-                            </div>
-                        `).join('')}
+                        <div class="stat">
+                            <div class="stat-value">${this.formatDuration(userData.spent_week)}</div>
+                            <div class="stat-label">Spent Week</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${this.formatDuration(userData.spent_month)}</div>
+                            <div class="stat-label">Spent Month</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${this.formatDuration(userData.spent_balance)}</div>
+                            <div class="stat-label">Balance</div>
+                        </div>
                     </div>
                 `;
                 
@@ -329,17 +278,23 @@
             }
 
             formatDuration(seconds) {
-                if (seconds < 60) {
-                    return `${seconds}s`;
-                } else if (seconds < 3600) {
-                    const minutes = Math.floor(seconds / 60);
-                    const remainingSeconds = seconds % 60;
-                    return `${minutes}m ${remainingSeconds}s`;
+                const isNegative = seconds < 0;
+                const absSeconds = Math.abs(seconds);
+                let result = '';
+
+                if (absSeconds < 60) {
+                    result = `${absSeconds}s`;
+                } else if (absSeconds < 3600) {
+                    const minutes = Math.floor(absSeconds / 60);
+                    const remainingSeconds = absSeconds % 60;
+                    result = `${minutes}m ${remainingSeconds}s`;
                 } else {
-                    const hours = Math.floor(seconds / 3600);
-                    const minutes = Math.floor((seconds % 3600) / 60);
-                    return `${hours}h ${minutes}m`;
+                    const hours = Math.floor(absSeconds / 3600);
+                    const minutes = Math.floor((absSeconds % 3600) / 60);
+                    result = `${hours}h ${minutes}m`;
                 }
+
+                return isNegative ? `-${result}` : result;
             }
 
             updateLastUpdate() {

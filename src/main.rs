@@ -1,25 +1,26 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use async_nats::Client;
 use axum::{
-    extract::{State, WebSocketUpgrade, ws::Message},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::{Html, Response},
     routing::{get, get_service},
     Router,
 };
 use clap::Parser;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{error, info};
 use tracing_subscriber;
-use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -39,9 +40,11 @@ pub struct ScreenTimeEvent {
     pub host: String,
     pub user: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub duration_seconds: u64,
-    pub process_name: Option<String>,
-    pub window_title: Option<String>,
+    pub left_day: i64,
+    pub spent_balance: i64,
+    pub spent_month: i64,
+    pub spent_week: i64,
+    pub spent_day: i64,
 }
 
 #[derive(Clone)]
@@ -53,10 +56,10 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::init();
+    tracing_subscriber::fmt::init();
 
     let config = Config::parse();
-    
+
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| config.nats_url.clone());
     let nats_subject = env::var("NATS_SUBJECT").unwrap_or_else(|_| config.nats_subject.clone());
 
@@ -81,10 +84,7 @@ async fn main() -> Result<()> {
         .route("/ws", get(websocket_handler))
         .route("/api/screentime", get(get_screentime_data))
         .nest_service("/static", get_service(ServeDir::new("static")))
-        .layer(
-            ServiceBuilder::new()
-                .layer(CorsLayer::permissive())
-        )
+        .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
 }
 
 async fn subscribe_to_screentime(state: AppState, subject: String) {
-    let mut subscriber = match state.nats_client.subscribe(&subject).await {
+    let mut subscriber = match state.nats_client.subscribe(subject.clone()).await {
         Ok(sub) => sub,
         Err(e) => {
             error!("Failed to subscribe to NATS: {}", e);
@@ -111,12 +111,12 @@ async fn subscribe_to_screentime(state: AppState, subject: String) {
 
         if let Ok(event) = parse_nats_message(&subject, &payload) {
             let key = format!("{}:{}", event.host, event.user);
-            
+
             {
                 let mut data = state.screen_time_data.write().await;
                 let events = data.entry(key.clone()).or_insert_with(Vec::new);
                 events.push(event.clone());
-                
+
                 if events.len() > 1000 {
                     events.remove(0);
                 }
@@ -125,7 +125,7 @@ async fn subscribe_to_screentime(state: AppState, subject: String) {
             if let Err(e) = state.event_sender.send(event) {
                 error!("Failed to send event to subscribers: {}", e);
             }
-            
+
             info!("Processed screentime event for: {}", key);
         }
     }
@@ -147,15 +147,17 @@ fn parse_nats_message(subject: &str, payload: &[u8]) -> Result<ScreenTimeEvent> 
         host,
         user,
         timestamp: chrono::Utc::now(),
-        duration_seconds: data.get("duration_seconds")
-            .and_then(|v| v.as_u64())
+        left_day: data.get("left_day").and_then(|v| v.as_i64()).unwrap_or(0),
+        spent_balance: data
+            .get("spent_balance")
+            .and_then(|v| v.as_i64())
             .unwrap_or(0),
-        process_name: data.get("process_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        window_title: data.get("window_title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        spent_month: data
+            .get("spent_month")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        spent_week: data.get("spent_week").and_then(|v| v.as_i64()).unwrap_or(0),
+        spent_day: data.get("spent_day").and_then(|v| v.as_i64()).unwrap_or(0),
     };
 
     Ok(event)
@@ -172,14 +174,11 @@ async fn get_screentime_data(
     axum::Json(data.clone())
 }
 
-async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_websocket(socket, state))
 }
 
-async fn handle_websocket(mut socket: axum::extract::ws::WebSocket, state: AppState) {
+async fn handle_websocket(mut socket: WebSocket, state: AppState) {
     let mut recv = state.event_sender.subscribe();
 
     loop {
