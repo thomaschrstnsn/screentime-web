@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_nats::Client;
+use async_nats::jetstream::{self, consumer::DeliverPolicy};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -31,8 +31,11 @@ struct Config {
     #[arg(short = 'u', long, default_value = "nats://localhost:4222")]
     nats_url: String,
 
-    #[arg(short = 's', long, default_value = "time.obs.*")]
+    #[arg(short = 's', long, default_value = "time.obs.>")]
     nats_subject: String,
+
+    #[arg(long, default_value = "OBSERVATIONS")]
+    nats_stream: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,32 +54,39 @@ pub struct ScreenTimeEvent {
 pub struct AppState {
     pub screen_time_data: Arc<RwLock<HashMap<String, Vec<ScreenTimeEvent>>>>,
     pub event_sender: broadcast::Sender<ScreenTimeEvent>,
-    pub nats_client: Client,
+    pub jetstream: jetstream::Context,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
     tracing_subscriber::fmt::init();
 
     let config = Config::parse();
 
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| config.nats_url.clone());
     let nats_subject = env::var("NATS_SUBJECT").unwrap_or_else(|_| config.nats_subject.clone());
+    let nats_stream = env::var("NATS_STREAM").unwrap_or_else(|_| config.nats_stream.clone());
 
     info!("Connecting to NATS at: {}", nats_url);
     let nats_client = async_nats::connect(&nats_url).await?;
+    let jetstream = jetstream::new(nats_client);
+
     let (event_sender, _) = broadcast::channel::<ScreenTimeEvent>(1000);
 
     let app_state = AppState {
         screen_time_data: Arc::new(RwLock::new(HashMap::new())),
         event_sender,
-        nats_client: nats_client.clone(),
+        jetstream: jetstream.clone(),
     };
 
     let nats_state = app_state.clone();
     let nats_subject_clone = nats_subject.clone();
+    let nats_stream_clone = nats_stream.clone();
     tokio::spawn(async move {
-        subscribe_to_screentime(nats_state, nats_subject_clone).await;
+        subscribe_to_screentime(nats_state, nats_subject_clone, nats_stream_clone).await;
     });
 
     let app = Router::new()
@@ -94,44 +104,105 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn subscribe_to_screentime(state: AppState, subject: String) {
-    let mut subscriber = match state.nats_client.subscribe(subject.clone()).await {
-        Ok(sub) => sub,
+async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: String) {
+    // Get the stream
+    let stream = match state.jetstream.get_stream(stream_name.clone()).await {
+        Ok(s) => s,
         Err(e) => {
-            error!("Failed to subscribe to NATS: {}", e);
+            error!("Failed to get JetStream stream '{}': {}", stream_name, e);
             return;
         }
     };
 
-    info!("Subscribed to NATS subject: {}", subject);
+    info!("Found JetStream stream: {}", stream_name);
 
-    while let Some(message) = subscriber.next().await {
-        let subject = message.subject.clone();
-        let payload = message.payload.clone();
+    // Create a pull consumer with LastPerSubject policy
+    let consumer = match stream
+        .create_consumer(jetstream::consumer::pull::Config {
+            durable_name: None, // Ephemeral consumer
+            deliver_policy: DeliverPolicy::LastPerSubject,
+            filter_subject: subject.clone(),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to create JetStream consumer: {}", e);
+            return;
+        }
+    };
 
-        if let Ok(event) = parse_nats_message(&subject, &payload) {
-            let key = format!("{}:{}", event.host, event.user);
+    info!("Created JetStream consumer for subject: {}", subject);
 
-            {
-                let mut data = state.screen_time_data.write().await;
-                let events = data.entry(key.clone()).or_insert_with(Vec::new);
-                events.push(event.clone());
+    // Get messages stream
+    let mut messages = match consumer.messages().await {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Failed to get consumer messages: {}", e);
+            return;
+        }
+    };
 
-                if events.len() > 1000 {
-                    events.remove(0);
+    while let Some(message_result) = messages.next().await {
+        match message_result {
+            Ok(message) => {
+                let subject = message.subject.clone();
+                let payload = message.payload.clone();
+                let timestamp = message
+                    .info()
+                    .ok()
+                    .map(|i| i.published)
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::from(t)))
+                    .unwrap_or_else(chrono::Utc::now);
+
+                info!("Received message on subject: {}", subject);
+                if let Ok(payload_str) = std::str::from_utf8(&payload) {
+                    info!("Payload: {}", payload_str);
+                }
+
+                match parse_nats_message(&subject, &payload, timestamp) {
+                    Ok(event) => {
+                        let key = format!("{}:{}", event.host, event.user);
+                        // ... existing code ...
+                        {
+                            let mut data = state.screen_time_data.write().await;
+                            let events = data.entry(key.clone()).or_insert_with(Vec::new);
+                            events.push(event.clone());
+
+                            if events.len() > 1000 {
+                                events.remove(0);
+                            }
+                        }
+
+                        if let Err(e) = state.event_sender.send(event) {
+                            error!("Failed to send event to subscribers: {}", e);
+                        }
+
+                        info!("Processed screentime event for: {}", key);
+                    }
+                    Err(e) => {
+                        error!("Failed to parse message from {}: {}", subject, e);
+                    }
+                }
+
+                // Acknowledge the message
+                if let Err(e) = message.ack().await {
+                    error!("Failed to ack message: {}", e);
                 }
             }
-
-            if let Err(e) = state.event_sender.send(event) {
-                error!("Failed to send event to subscribers: {}", e);
+            Err(e) => {
+                error!("Error receiving message: {}", e);
             }
-
-            info!("Processed screentime event for: {}", key);
         }
     }
 }
 
-fn parse_nats_message(subject: &str, payload: &[u8]) -> Result<ScreenTimeEvent> {
+fn parse_nats_message(
+    subject: &str,
+    payload: &[u8],
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<ScreenTimeEvent> {
     let parts: Vec<&str> = subject.split('.').collect();
     if parts.len() < 4 || parts[0] != "time" || parts[1] != "obs" {
         return Err(anyhow::anyhow!("Invalid subject format"));
@@ -146,7 +217,7 @@ fn parse_nats_message(subject: &str, payload: &[u8]) -> Result<ScreenTimeEvent> 
     let event = ScreenTimeEvent {
         host,
         user,
-        timestamp: chrono::Utc::now(),
+        timestamp,
         left_day: data.get("left_day").and_then(|v| v.as_i64()).unwrap_or(0),
         spent_balance: data
             .get("spent_balance")
@@ -179,6 +250,20 @@ async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<AppState>) 
 }
 
 async fn handle_websocket(mut socket: WebSocket, state: AppState) {
+    // Send existing data to the new client
+    {
+        let data = state.screen_time_data.read().await;
+        for events in data.values() {
+            if let Some(latest_event) = events.last() {
+                if let Ok(json) = serde_json::to_string(latest_event) {
+                    if socket.send(Message::Text(json)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     let mut recv = state.event_sender.subscribe();
 
     loop {

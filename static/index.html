@@ -74,6 +74,9 @@
             border-bottom: 2px solid #e9ecef;
             padding-bottom: 10px;
             margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
         }
 
         .user-name {
@@ -85,6 +88,12 @@
         .host-name {
             font-size: 0.9em;
             color: #6c757d;
+        }
+        
+        .timestamp {
+            font-size: 0.8em;
+            color: #6c757d;
+            margin-left: auto;
         }
 
         .stats {
@@ -249,6 +258,7 @@
                     <div class="user-header">
                         <div class="user-name">${userData.user}</div>
                         <div class="host-name">${userData.host}</div>
+                        <div class="timestamp" title="${new Date(userData.timestamp).toLocaleString()}">${this.formatRelativeTime(userData.timestamp)}</div>
                     </div>
                     <div class="stats">
                         <div class="stat">
@@ -295,6 +305,27 @@
                 }
 
                 return isNegative ? `-${result}` : result;
+            }
+
+            formatRelativeTime(timestamp) {
+                const date = new Date(timestamp);
+                const now = new Date();
+                const diffSeconds = Math.floor((now - date) / 1000);
+
+                if (diffSeconds < 5) {
+                    return 'current';
+                } else if (diffSeconds < 60) {
+                    return `${diffSeconds}s ago`;
+                } else if (diffSeconds < 3600) {
+                    const mins = Math.floor(diffSeconds / 60);
+                    return `${mins}m ago`;
+                } else if (diffSeconds < 86400) {
+                    const hours = Math.floor(diffSeconds / 3600);
+                    return `${hours}h ago`;
+                } else {
+                    const days = Math.floor(diffSeconds / 86400);
+                    return `${days}d ago`;
+                }
             }
 
             updateLastUpdate() {
