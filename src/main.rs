@@ -9,9 +9,10 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    middleware,
     response::{Html, Response},
     routing::{get, get_service},
-    Router,
+    Extension, Router,
 };
 use clap::Parser;
 use futures::StreamExt;
@@ -20,6 +21,9 @@ use tokio::sync::{broadcast, RwLock};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{error, info};
+
+mod auth;
+use auth::{CfAccessConfig, CloudflareIdentity};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -88,12 +92,24 @@ async fn main() -> Result<()> {
         subscribe_to_screentime(nats_state, nats_subject_clone, nats_stream_clone).await;
     });
 
+    // Load Cloudflare Access config from environment (optional)
+    let cf_config = CfAccessConfig::from_env();
+    if cf_config.is_none() {
+        info!("CF_ACCESS_TEAM and/or CF_ACCESS_AUD not set - running without Cloudflare Access authentication");
+    }
+
     let app = Router::new()
         .route("/", get(index))
         .route("/ws", get(websocket_handler))
         .route("/api/screentime", get(get_screentime_data))
         .nest_service("/static", get_service(ServeDir::new("static")))
-        .layer(ServiceBuilder::new().layer(CorsLayer::permissive()))
+        .layer(
+            ServiceBuilder::new()
+                .layer(middleware::from_fn(move |req, next| {
+                    auth::cf_access_middleware(cf_config.clone(), req, next)
+                }))
+                .layer(CorsLayer::permissive()),
+        )
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
@@ -233,7 +249,12 @@ fn parse_nats_message(
     Ok(event)
 }
 
-async fn index() -> Html<&'static str> {
+async fn index(Extension(identity): Extension<Option<CloudflareIdentity>>) -> Html<&'static str> {
+    if let Some(user) = identity {
+        info!("Index page accessed by: {}", user.email);
+    } else {
+        info!("Index page accessed anonymously");
+    }
     Html(include_str!("../static/index.html"))
 }
 
