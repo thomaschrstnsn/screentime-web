@@ -17,11 +17,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
 
 /// Header name for the Cloudflare Access JWT
 const CF_ACCESS_JWT_HEADER: &str = "Cf-Access-Jwt-Assertion";
@@ -83,7 +82,7 @@ impl JwksCache {
     /// Fetch JWKS from Cloudflare (called on cache miss)
     async fn fetch_jwks(&self) -> Result<JwkSet, String> {
         let url = self.jwks_url();
-        info!("Fetching JWKS from: {}", url);
+        tracing::info!("Fetching JWKS from: {}", url);
 
         let response = reqwest::get(&url)
             .await
@@ -98,7 +97,7 @@ impl JwksCache {
             .await
             .map_err(|e| format!("Failed to parse JWKS: {}", e))?;
 
-        info!("Successfully fetched {} keys from JWKS", jwks.keys.len());
+        tracing::info!("Successfully fetched {} keys from JWKS", jwks.keys.len());
         Ok(jwks)
     }
 
@@ -145,7 +144,7 @@ pub async fn validate_cf_jwt(
         .kid
         .ok_or_else(|| "JWT header missing 'kid' field".to_string())?;
 
-    debug!("JWT uses key ID: {}", kid);
+    tracing::debug!("JWT uses key ID: {}", kid);
 
     // Get JWKS and find the matching key
     let jwks = jwks_cache.get_jwks().await?;
@@ -197,7 +196,7 @@ impl CfAccessConfig {
             return None;
         }
 
-        info!(
+        tracing::info!(
             "Cloudflare Access authentication enabled for team: {}",
             team
         );
@@ -231,7 +230,7 @@ pub async fn cf_access_middleware(
     let config = match config {
         Some(c) => c,
         None => {
-            debug!("CF Access not configured, proceeding anonymously");
+            tracing::debug!("CF Access not configured, proceeding anonymously");
             request.extensions_mut().insert(None::<CloudflareIdentity>);
             return next.run(request).await;
         }
@@ -241,7 +240,7 @@ pub async fn cf_access_middleware(
     let token = match extract_cf_jwt(request.headers()) {
         Some(t) => t,
         None => {
-            debug!("No CF Access JWT header present, proceeding anonymously");
+            tracing::debug!("No CF Access JWT header present, proceeding anonymously");
             request.extensions_mut().insert(None::<CloudflareIdentity>);
             return next.run(request).await;
         }
@@ -250,12 +249,12 @@ pub async fn cf_access_middleware(
     // Validate the JWT
     match validate_cf_jwt(token, &config.jwks_cache, &config.audience).await {
         Ok(identity) => {
-            info!("Authenticated user: {}", identity.email);
+            tracing::info!("Authenticated user: {}", identity.email);
             request.extensions_mut().insert(Some(identity));
             next.run(request).await
         }
         Err(e) => {
-            warn!("JWT validation failed: {}", e);
+            tracing::warn!("JWT validation failed: {}", e);
             (
                 StatusCode::UNAUTHORIZED,
                 format!("Invalid authentication token: {}", e),
@@ -281,8 +280,8 @@ mod tests {
     #[test]
     fn test_config_from_env_missing() {
         // Should return None when env vars are not set
-        std::env::remove_var("CF_ACCESS_TEAM");
-        std::env::remove_var("CF_ACCESS_AUD");
+        unsafe { std::env::remove_var("CF_ACCESS_TEAM") };
+        unsafe { std::env::remove_var("CF_ACCESS_AUD") };
         assert!(CfAccessConfig::from_env().is_none());
     }
 }

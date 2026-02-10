@@ -5,22 +5,21 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_nats::jetstream::{self, consumer::DeliverPolicy};
 use axum::{
+    Extension, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     middleware,
     response::{Html, Response},
     routing::{get, get_service},
-    Extension, Router,
 };
 use clap::Parser;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeDir};
-use tracing::{error, info};
 
 mod auth;
 use auth::{CfAccessConfig, CloudflareIdentity};
@@ -62,9 +61,6 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
     tracing_subscriber::fmt::init();
 
     let config = Config::parse();
@@ -73,7 +69,7 @@ async fn main() -> Result<()> {
     let nats_subject = env::var("NATS_SUBJECT").unwrap_or_else(|_| config.nats_subject.clone());
     let nats_stream = env::var("NATS_STREAM").unwrap_or_else(|_| config.nats_stream.clone());
 
-    info!("Connecting to NATS at: {}", nats_url);
+    tracing::info!("Connecting to NATS at: {}", nats_url);
     let nats_client = async_nats::connect(&nats_url).await?;
     let jetstream = jetstream::new(nats_client);
 
@@ -95,7 +91,9 @@ async fn main() -> Result<()> {
     // Load Cloudflare Access config from environment (optional)
     let cf_config = CfAccessConfig::from_env();
     if cf_config.is_none() {
-        info!("CF_ACCESS_TEAM and/or CF_ACCESS_AUD not set - running without Cloudflare Access authentication");
+        tracing::info!(
+            "CF_ACCESS_TEAM and/or CF_ACCESS_AUD not set - running without Cloudflare Access authentication"
+        );
     }
 
     let app = Router::new()
@@ -113,7 +111,7 @@ async fn main() -> Result<()> {
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
-    info!("Server running on http://{}", config.bind);
+    tracing::info!("Server running on http://{}", config.bind);
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -124,12 +122,12 @@ async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: 
     let stream = match state.jetstream.get_stream(stream_name.clone()).await {
         Ok(s) => s,
         Err(e) => {
-            error!("Failed to get JetStream stream '{}': {}", stream_name, e);
+            tracing::error!("Failed to get JetStream stream '{}': {}", stream_name, e);
             return;
         }
     };
 
-    info!("Found JetStream stream: {}", stream_name);
+    tracing::info!("Found JetStream stream: {}", stream_name);
 
     // Create a pull consumer with LastPerSubject policy
     let consumer = match stream
@@ -143,18 +141,18 @@ async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: 
     {
         Ok(c) => c,
         Err(e) => {
-            error!("Failed to create JetStream consumer: {}", e);
+            tracing::error!("Failed to create JetStream consumer: {}", e);
             return;
         }
     };
 
-    info!("Created JetStream consumer for subject: {}", subject);
+    tracing::info!("Created JetStream consumer for subject: {}", subject);
 
     // Get messages stream
     let mut messages = match consumer.messages().await {
         Ok(m) => m,
         Err(e) => {
-            error!("Failed to get consumer messages: {}", e);
+            tracing::error!("Failed to get consumer messages: {}", e);
             return;
         }
     };
@@ -171,9 +169,9 @@ async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: 
                     .map(|t| chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::from(t)))
                     .unwrap_or_else(chrono::Utc::now);
 
-                info!("Received message on subject: {}", subject);
+                tracing::info!("Received message on subject: {}", subject);
                 if let Ok(payload_str) = std::str::from_utf8(&payload) {
-                    info!("Payload: {}", payload_str);
+                    tracing::info!("Payload: {}", payload_str);
                 }
 
                 match parse_nats_message(&subject, &payload, timestamp) {
@@ -191,23 +189,23 @@ async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: 
                         }
 
                         if let Err(e) = state.event_sender.send(event) {
-                            error!("Failed to send event to subscribers: {}", e);
+                            tracing::error!("Failed to send event to subscribers: {}", e);
                         }
 
-                        info!("Processed screentime event for: {}", key);
+                        tracing::info!("Processed screentime event for: {}", key);
                     }
                     Err(e) => {
-                        error!("Failed to parse message from {}: {}", subject, e);
+                        tracing::error!("Failed to parse message from {}: {}", subject, e);
                     }
                 }
 
                 // Acknowledge the message
                 if let Err(e) = message.ack().await {
-                    error!("Failed to ack message: {}", e);
+                    tracing::error!("Failed to ack message: {}", e);
                 }
             }
             Err(e) => {
-                error!("Error receiving message: {}", e);
+                tracing::error!("Error receiving message: {}", e);
             }
         }
     }
@@ -251,9 +249,9 @@ fn parse_nats_message(
 
 async fn index(Extension(identity): Extension<Option<CloudflareIdentity>>) -> Html<&'static str> {
     if let Some(user) = identity {
-        info!("Index page accessed by: {}", user.email);
+        tracing::info!("Index page accessed by: {}", user.email);
     } else {
-        info!("Index page accessed anonymously");
+        tracing::info!("Index page accessed anonymously");
     }
     Html(include_str!("../static/index.html"))
 }
@@ -274,12 +272,11 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
     {
         let data = state.screen_time_data.read().await;
         for events in data.values() {
-            if let Some(latest_event) = events.last() {
-                if let Ok(json) = serde_json::to_string(latest_event) {
-                    if socket.send(Message::Text(json)).await.is_err() {
-                        return;
-                    }
-                }
+            if let Some(latest_event) = events.last()
+                && let Ok(json) = serde_json::to_string(latest_event)
+                && socket.send(Message::Text(json.into())).await.is_err()
+            {
+                return;
             }
         }
     }
@@ -295,7 +292,7 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
+                        tracing::error!("WebSocket error: {}", e);
                         break;
                     }
                     None => break,
@@ -304,11 +301,10 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
             event = recv.recv() => {
                 match event {
                     Ok(event) => {
-                        if let Ok(json) = serde_json::to_string(&event) {
-                            if socket.send(Message::Text(json)).await.is_err() {
+                        if let Ok(json) = serde_json::to_string(&event)
+                            && socket.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
-                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         continue;
