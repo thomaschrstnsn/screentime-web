@@ -1,77 +1,77 @@
 # Screen Time Monitor
 
-A web application built with Rust, Axum, and HTMX that displays real-time screen time data from NATS messages.
+A real-time web dashboard for monitoring screen time usage across multiple users and hosts. This application consumes screen time events from a NATS JetStream server and provides a live view of usage statistics via a WebSocket-enabled web interface.
 
 ## Features
 
-- **Real-time Updates**: WebSocket connection for live screen time data
-- **NATS Integration**: Subscribes to `time.obs.<host>.<user>` subjects
-- **Responsive UI**: Clean, modern interface using HTMX
-- **User/Host Grouping**: Organizes data by user and host combinations
-- **Usage Statistics**: Shows left/spent time for day, week, month, and balance
+- **Real-time Monitoring**: Updates instantly as new screen time events are received via WebSockets.
+- **NATS JetStream Integration**: Reliable event consumption using NATS JetStream.
+- **Cloudflare Access Support**: Optional middleware for secure authentication behind Cloudflare Access.
+- **Responsive Dashboard**: View detailed statistics including:
+  - Time remaining today
+  - Time spent today, this week, and this month
+  - Current balance
+  - Active host and user information
 
-## Requirements
+## Usage
 
-- NATS server
-- Rust 1.70+
+### Prerequisites
 
-## Configuration
+- Rust toolchain (latest stable)
+- NATS Server with JetStream enabled
 
-The application can be configured using command-line arguments or environment variables:
+### Running the Application
 
-### Command Line Arguments
+You can run the application using `cargo`:
 
 ```bash
-# Start with default settings
-cargo run
+cargo run --release
+```
 
-# Specify custom NATS URL and bind address
-cargo run -- --nats-url nats://nats.example.com:4222 --bind 0.0.0.0:8080
+By default, the server listens on `127.0.0.1:3000`.
 
-# Specify custom subject pattern
-cargo run -- --nats-subject "time.data.*"
+### Command Line Options
 
-# Show all options
+```bash
 cargo run -- --help
 ```
 
-### Environment Variables
+- `-b, --bind <BIND>`: Address to bind the server to (default: "127.0.0.1:3000")
+- `-u, --nats-url <NATS_URL>`: NATS server URL (default: "nats://localhost:4222")
+- `-s, --nats-subject <NATS_SUBJECT>`: NATS subject to subscribe to (default: "time.obs.>")
+- `--nats-stream <NATS_STREAM>`: NATS JetStream stream name (default: "OBSERVATIONS")
 
-```bash
-# Set NATS server URL
-export NATS_URL="nats://nats.example.com:4222"
+## Configuration
 
-# Set NATS subject pattern
-export NATS_SUBJECT="time.data.*"
+The application can be configured via command-line arguments or environment variables.
 
-# Then run with defaults
-cargo run
-```
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `NATS_URL` | NATS server URL | `nats://localhost:4222` |
+| `NATS_SUBJECT` | NATS subject pattern | `time.obs.>` |
+| `NATS_STREAM` | JetStream stream name | `OBSERVATIONS` |
+| `CF_ACCESS_TEAM` | Cloudflare Access team name | (Optional) |
+| `CF_ACCESS_AUD` | Cloudflare Access audience tag | (Optional) |
 
-### Configuration Priority
+### Cloudflare Access Authentication
 
-1. Command-line arguments (highest priority)
-2. Environment variables
-3. Default values (lowest priority)
+To enable Cloudflare Access authentication, set the `CF_ACCESS_TEAM` and `CF_ACCESS_AUD` environment variables. When enabled, the application will validate the `Cf-Access-Jwt-Assertion` header on incoming requests.
 
-**Default Values:**
-- NATS URL: `nats://localhost:4222`
-- Bind Address: `127.0.0.1:3000`
-- Subject Pattern: `time.obs.*`
+## Data Format
 
-## NATS Message Format
-
-The application expects JSON messages on subjects matching `time.obs.<host>.<user>` with the following structure:
+The application expects NATS messages on the subject `time.obs.<host>.<user>` (captured by the default `time.obs.>` wildcard) with a JSON payload containing:
 
 ```json
 {
-  "left_day": 866,
-  "spent_balance": 6334,
-  "spent_month": 49090,
-  "spent_week": 41889,
-  "spent_day": 6334
+  "left_day": 3600,
+  "spent_balance": 1200,
+  "spent_month": 50000,
+  "spent_week": 12000,
+  "spent_day": 4000
 }
 ```
+
+Values are in seconds.
 
 ## API Endpoints
 
@@ -80,9 +80,6 @@ The application expects JSON messages on subjects matching `time.obs.<host>.<use
 - `/api/screentime` - REST API to fetch current screen time data
 - `/static/` - Static file serving
 
-## Architecture
+## License
 
-- **NATS Subscriber**: Listens for screen time events
-- **In-memory Storage**: Maintains recent activity data
-- **WebSocket Broadcasting**: Real-time updates to connected clients
-- **Responsive UI**: Clean dashboard with activity tracking
+[MIT](LICENSE)
