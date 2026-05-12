@@ -103,7 +103,6 @@ impl JwksCache {
 
     /// Get the cached JWKS, fetching if necessary
     pub async fn get_jwks(&self) -> Result<JwkSet, String> {
-        // Check cache first
         {
             let cache = self.inner.read().await;
             if let Some(jwks) = cache.as_ref() {
@@ -111,14 +110,31 @@ impl JwksCache {
             }
         }
 
-        // Fetch and cache
+        self.fetch_and_cache().await
+    }
+
+    /// Force-refresh the cache and return the updated JWKS
+    async fn fetch_and_cache(&self) -> Result<JwkSet, String> {
         let jwks = self.fetch_jwks().await?;
-        {
-            let mut cache = self.inner.write().await;
-            *cache = Some(jwks.clone());
+        let mut cache = self.inner.write().await;
+        *cache = Some(jwks.clone());
+        Ok(jwks)
+    }
+
+    /// Look up a key by kid, refreshing the cache on cache miss
+    pub async fn find_key(&self, kid: &str) -> Result<jsonwebtoken::jwk::Jwk, String> {
+        let jwks = self.get_jwks().await?;
+
+        if let Some(jwk) = jwks.find(kid) {
+            return Ok(jwk.clone());
         }
 
-        Ok(jwks)
+        tracing::info!("Key {} not found in cached JWKS, refreshing...", kid);
+        let jwks = self.fetch_and_cache().await?;
+
+        jwks.find(kid)
+            .cloned()
+            .ok_or_else(|| format!("No matching key found for kid: {}", kid))
     }
 
     /// Force refresh the JWKS cache
@@ -146,15 +162,11 @@ pub async fn validate_cf_jwt(
 
     tracing::debug!("JWT uses key ID: {}", kid);
 
-    // Get JWKS and find the matching key
-    let jwks = jwks_cache.get_jwks().await?;
-
-    let jwk = jwks
-        .find(&kid)
-        .ok_or_else(|| format!("No matching key found for kid: {}", kid))?;
+    // Get JWKS and find the matching key (refreshes cache if needed)
+    let jwk = jwks_cache.find_key(&kid).await?;
 
     // Create decoding key from JWK
-    let decoding_key = DecodingKey::from_jwk(jwk)
+    let decoding_key = DecodingKey::from_jwk(&jwk)
         .map_err(|e| format!("Failed to create decoding key from JWK: {}", e))?;
 
     // Set up validation
