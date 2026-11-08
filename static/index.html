@@ -1,350 +1,488 @@
 <!DOCTYPE html>
+<!--
+  PROTOTYPE (throwaway, branch prototype/time-adjust-controls, never merged).
+  Question: what should the time adjustment controls on the cards look and behave like?
+  Three variants on the existing page, switchable via ?variant=A|B|C and the floating bar.
+  Opened as a file (or with ?mock), the page uses fake observations and a stubbed collector
+  reply instead of the WebSocket/NATS. Pick the outcome and viewer in the bar.
+-->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Screen Time Monitor</title>
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; padding-bottom: 260px; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .header h1 { color: #2c3e50; font-size: 2em; margin-bottom: 10px; }
+        .status { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
+        .status.connected { background: #d4edda; color: #155724; }
+        .status.disconnected { background: #f8d7da; color: #721c24; }
+        .whoami { float: right; font-size: 0.85em; color: #6c757d; }
+        .user-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-top: 20px; }
+        .user-card { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .user-header { border-bottom: 2px solid #e9ecef; padding-bottom: 10px; margin-bottom: 15px; display: flex; align-items: center; gap: 15px; }
+        .user-name { font-size: 1.2em; font-weight: bold; color: #2c3e50; }
+        .host-name { font-size: 0.9em; color: #6c757d; }
+        .timestamp { font-size: 0.8em; color: #6c757d; margin-left: auto; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 0; }
+        .stat { text-align: center; padding: 10px; background: #f8f9fa; border-radius: 4px; }
+        .stat-value { font-size: 1.2em; font-weight: bold; color: #007bff; }
+        .stat-label { font-size: 0.8em; color: #6c757d; margin-top: 4px; }
+        .no-data { text-align: center; color: #6c757d; font-style: italic; padding: 40px; }
+        .flash { animation: flash 1.2s; }
+        @keyframes flash { 0% { background: #fff3a0; } 100% { background: #f8f9fa; } }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
-            color: #333;
-        }
+        /* shared bits for adjustment UI */
+        button { font: inherit; cursor: pointer; }
+        button:disabled { cursor: not-allowed; opacity: 0.45; }
+        .btn { border: 1px solid #ced4da; background: white; border-radius: 6px; padding: 6px 12px; }
+        .btn:hover:not(:disabled) { background: #f1f3f5; }
+        .btn.add { border-color: #8fd19e; color: #155724; }
+        .btn.remove { border-color: #f1aeb5; color: #842029; }
+        .btn.primary { background: #007bff; border-color: #007bff; color: white; }
+        .btn.danger { background: #dc3545; border-color: #dc3545; color: white; }
+        .msg { margin-top: 10px; padding: 8px 10px; border-radius: 6px; font-size: 0.9em; display: flex; gap: 8px; align-items: flex-start; }
+        .msg .x { margin-left: auto; border: none; background: none; color: inherit; opacity: 0.6; }
+        .msg.inflight { background: #e7f1ff; color: #084298; }
+        .msg.ok { background: #d1e7dd; color: #0f5132; }
+        .msg.warn { background: #fff3cd; color: #664d03; }
+        .msg.err { background: #f8d7da; color: #842029; }
+        .msg.unknown { background: #e2e3e5; color: #41464b; }
+        .note { margin-top: 8px; font-size: 0.8em; color: #6c757d; font-style: italic; }
+        .spin { display: inline-block; flex: none; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-top: 3px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
+        /* Variant A: preset chips */
+        .a-row { margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .a-row .lbl { font-size: 0.85em; color: #6c757d; margin-right: 4px; }
+        .a-confirm { margin-top: 15px; padding: 10px; border: 1px solid #f1aeb5; border-radius: 6px; background: #fff5f5; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .a-confirm span { flex: 1; }
 
-        .header {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
+        /* Variant B: hero stepper */
+        .b-hero { display: flex; align-items: center; justify-content: center; gap: 18px; padding: 14px; background: #f8f9fa; border-radius: 8px; margin-bottom: 10px; }
+        .b-hero .round { width: 44px; height: 44px; border-radius: 50%; font-size: 1.5em; line-height: 1; border: 1px solid #ced4da; background: white; }
+        .b-hero .center { text-align: center; min-width: 170px; }
+        .b-hero .big { font-size: 2em; font-weight: bold; color: #007bff; }
+        .b-hero .pending { font-size: 0.95em; margin-top: 4px; min-height: 1.6em; }
+        .b-hero .pending input { width: 70px; font: inherit; text-align: right; padding: 2px 4px; }
+        .b-hero .pending.add { color: #155724; }
+        .b-hero .pending.remove { color: #842029; }
+        .b-actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 12px; }
+        .b-stats .stat-value { font-size: 1em; }
 
-        .header h1 {
-            color: #2c3e50;
-            font-size: 2em;
-            margin-bottom: 10px;
-        }
+        /* Variant C: dialog */
+        .c-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
+        .c-dialog { background: white; border-radius: 10px; width: min(440px, 92vw); padding: 22px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
+        .c-dialog h2 { font-size: 1.15em; color: #2c3e50; margin-bottom: 4px; }
+        .c-dialog .sub { color: #6c757d; font-size: 0.9em; margin-bottom: 16px; }
+        .c-seg { display: flex; border: 1px solid #ced4da; border-radius: 6px; overflow: hidden; margin-bottom: 12px; }
+        .c-seg button { flex: 1; border: none; background: white; padding: 8px; }
+        .c-seg button.on.add { background: #d1e7dd; color: #0f5132; font-weight: bold; }
+        .c-seg button.on.remove { background: #f8d7da; color: #842029; font-weight: bold; }
+        .c-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+        .c-presets .btn.on { background: #2c3e50; color: white; border-color: #2c3e50; }
+        .c-presets input { width: 70px; font: inherit; padding: 5px; }
+        .c-review { padding: 10px; background: #f8f9fa; border-radius: 6px; margin-bottom: 16px; font-size: 0.95em; }
+        .c-foot { display: flex; justify-content: flex-end; gap: 8px; }
+        .c-result { font-size: 1.05em; text-align: center; padding: 10px 0 16px; }
+        .c-result .ba { font-size: 1.6em; font-weight: bold; margin: 8px 0; }
 
-        .status {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.8em;
-            font-weight: bold;
-        }
-
-        .status.connected {
-            background: #d4edda;
-            color: #155724;
-        }
-
-        .status.disconnected {
-            background: #f8d7da;
-            color: #721c24;
-        }
-
-        .user-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
-        }
-
-        .user-card {
-            background: white;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-
-        .user-header {
-            border-bottom: 2px solid #e9ecef;
-            padding-bottom: 10px;
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-
-        .user-name {
-            font-size: 1.2em;
-            font-weight: bold;
-            color: #2c3e50;
-        }
-
-        .host-name {
-            font-size: 0.9em;
-            color: #6c757d;
-        }
-        
-        .timestamp {
-            font-size: 0.8em;
-            color: #6c757d;
-            margin-left: auto;
-        }
-
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-            gap: 10px;
-            margin-bottom: 0;
-        }
-
-        .stat {
-            text-align: center;
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 4px;
-        }
-
-        .stat-value {
-            font-size: 1.2em;
-            font-weight: bold;
-            color: #007bff;
-        }
-
-        .stat-label {
-            font-size: 0.8em;
-            color: #6c757d;
-            margin-top: 4px;
-        }
-
-        .no-data {
-            text-align: center;
-            color: #6c757d;
-            font-style: italic;
-            padding: 40px;
-        }
-
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
-
-        .updating {
-            animation: pulse 1s infinite;
-        }
+        /* prototype bar + state panel (not part of the design) */
+        #proto-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); background: #111; color: #eee; border-radius: 999px; padding: 8px 14px; display: flex; gap: 10px; align-items: center; box-shadow: 0 4px 16px rgba(0,0,0,0.4); font-size: 0.85em; z-index: 100; white-space: nowrap; }
+        #proto-bar button { background: #333; color: #eee; border: none; border-radius: 999px; padding: 4px 10px; }
+        #proto-bar select { background: #333; color: #eee; border: none; border-radius: 6px; padding: 3px; font: inherit; }
+        #proto-bar .vl { min-width: 190px; text-align: center; font-weight: bold; }
+        #proto-state { position: fixed; right: 12px; bottom: 70px; width: 360px; max-height: 170px; overflow: auto; background: #111; color: #9fef9f; font: 11px/1.35 monospace; padding: 8px; border-radius: 8px; opacity: 0.9; z-index: 99; white-space: pre-wrap; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
+            <span class="whoami" id="whoami"></span>
             <h1>Screen Time Monitor</h1>
             <span id="connection-status" class="status disconnected">Disconnected</span>
             <span id="last-update">No data received</span>
         </div>
-
         <div id="user-container" class="user-grid">
             <div class="no-data">Waiting for screen time data...</div>
         </div>
     </div>
+    <div id="dialog-root"></div>
+
+    <div id="proto-bar">
+        <button id="pv">◀</button><span class="vl" id="vlabel"></span><button id="nv">▶</button>
+        <span>viewer</span>
+        <select id="viewer">
+            <option value="adjuster">adjuster</option>
+            <option value="disabled">not allowed: disabled</option>
+            <option value="hidden">not allowed: hidden</option>
+        </select>
+        <span>outcome</span>
+        <select id="outcome">
+            <option value="ok">ok</option>
+            <option value="ok_capped">ok, but capped by Timekpr</option>
+            <option value="no_responders">no responders (host offline)</option>
+            <option value="timeout">timeout (15 s)</option>
+            <option value="timekpr_rejected">timekpr_rejected</option>
+            <option value="internal">internal</option>
+        </select>
+    </div>
+    <pre id="proto-state"></pre>
 
     <script>
-        class ScreenTimeMonitor {
-            constructor() {
-                this.ws = null;
-                this.data = {};
-                this.reconnectAttempts = 0;
-                this.maxReconnectAttempts = 5;
-                this.reconnectDelay = 1000;
-                
-                this.connect();
-                this.startPeriodicUpdate();
-            }
+    const PARAMS = new URLSearchParams(location.search);
+    const MOCK = location.protocol === 'file:' || PARAMS.has('mock');
+    const VARIANTS = { A: 'Preset chips', B: 'Stepper + Apply', C: 'Dialog' };
+    const MAX_ABS = 8 * 3600;
+    const WAIT_MS = 15000;
 
-            connect() {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${window.location.host}/ws`;
-                
-                try {
-                    this.ws = new WebSocket(wsUrl);
-                    
-                    this.ws.onopen = () => {
-                        console.log('WebSocket connected');
-                        this.updateConnectionStatus(true);
-                        this.reconnectAttempts = 0;
-                    };
-                    
-                    this.ws.onmessage = (event) => {
-                        const screenTimeEvent = JSON.parse(event.data);
-                        this.updateData(screenTimeEvent);
-                    };
-                    
-                    this.ws.onclose = () => {
-                        console.log('WebSocket disconnected');
-                        this.updateConnectionStatus(false);
-                        this.attemptReconnect();
-                    };
-                    
-                    this.ws.onerror = (error) => {
-                        console.error('WebSocket error:', error);
-                        this.updateConnectionStatus(false);
-                    };
-                } catch (error) {
-                    console.error('Failed to create WebSocket:', error);
-                    this.updateConnectionStatus(false);
-                    this.attemptReconnect();
+    const proto = {
+        variant: VARIANTS[PARAMS.get('variant')] ? PARAMS.get('variant') : 'A',
+        viewer: PARAMS.get('viewer') || 'adjuster',
+        outcome: PARAMS.get('outcome') || 'ok',
+        lastRequest: null,
+        lastReply: null,
+    };
+
+    function setParam(k, v) {
+        const p = new URLSearchParams(location.search); p.set(k, v);
+        history.replaceState(null, '', `${location.pathname}?${p}`);
+    }
+
+    // Stub for the web -> collector request-reply (contract from the "Time adjustment contract" ticket).
+    function stubAdjust(obs, delta) {
+        const req = { request_id: crypto.randomUUID(), adjuster: 'thomas@example.com', delta_seconds: delta };
+        proto.lastRequest = { subject: `time.adjust.${obs.host}.${obs.user}`, ...req };
+        proto.lastReply = null;
+        const before = obs.left_day;
+        const o = proto.outcome;
+        return new Promise((resolve) => {
+            const reply = (r, ms) => setTimeout(() => { proto.lastReply = r; resolve(r); }, ms);
+            if (o === 'no_responders') return reply({ transport: 'no_responders' }, 80);
+            if (o === 'timeout') return reply({ transport: 'timeout' }, WAIT_MS);
+            if (o === 'timekpr_rejected') return reply({ status: 'error', code: 'timekpr_rejected', message: 'Timekpr could not compute the time left' }, 900);
+            if (o === 'internal') return reply({ status: 'error', code: 'internal', message: 'D-Bus call failed' }, 900);
+            let after = Math.max(0, before + delta);
+            if (o === 'ok_capped') after = delta > 0 ? before + 300 : 0; // e.g. allowed hours end in 5 min / clamped at zero
+            const observation = { ...obs, left_day: after, timestamp: new Date().toISOString() };
+            reply({ status: 'ok', left_day_before: before, observation }, 1200);
+        });
+    }
+
+    class ScreenTimeMonitor {
+        constructor() {
+            this.ws = null;
+            this.data = {};
+            this.ui = {};          // per-card adjustment UI state, keyed host:user
+            this.dialog = null;    // variant C: { key, sign, minutes, custom, phase, ... }
+            this.reconnectAttempts = 0;
+            this.maxReconnectAttempts = 5;
+            this.reconnectDelay = 1000;
+            document.addEventListener('click', (e) => this.onClick(e));
+            document.addEventListener('input', (e) => this.onInput(e));
+            if (MOCK) this.startMock(); else this.connect();
+            this.startPeriodicUpdate();
+        }
+
+        // ---------- data sources ----------
+        startMock() {
+            this.updateConnectionStatus(true);
+            const now = () => new Date().toISOString();
+            this.updateData({ host: 'cyrus', user: 'conrad', timestamp: now(), left_day: 4500, spent_day: 5400, spent_week: 38000, spent_month: 160000, spent_balance: 0 });
+            this.updateData({ host: 'test-vm', user: 'junior', timestamp: now(), left_day: 600, spent_day: 9000, spent_week: 30000, spent_month: 90000, spent_balance: 0 });
+            setInterval(() => { // 5 s observations; conrad is actively using the machine
+                const c = this.data['cyrus:conrad'];
+                this.updateData({ ...c, left_day: Math.max(0, c.left_day - 5), spent_day: c.spent_day + 5, timestamp: now() });
+                const j = this.data['test-vm:junior'];
+                this.updateData({ ...j, timestamp: now() });
+            }, 5000);
+        }
+
+        connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            try {
+                this.ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                this.ws.onopen = () => { this.updateConnectionStatus(true); this.reconnectAttempts = 0; };
+                this.ws.onmessage = (event) => this.updateData(JSON.parse(event.data));
+                this.ws.onclose = () => { this.updateConnectionStatus(false); this.attemptReconnect(); };
+                this.ws.onerror = () => this.updateConnectionStatus(false);
+            } catch (error) { this.updateConnectionStatus(false); this.attemptReconnect(); }
+        }
+        attemptReconnect() {
+            if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                this.reconnectAttempts++;
+                setTimeout(() => this.connect(), this.reconnectDelay * this.reconnectAttempts);
+            }
+        }
+        updateConnectionStatus(connected) {
+            const s = document.getElementById('connection-status');
+            s.textContent = connected ? (MOCK ? 'Connected (mock)' : 'Connected') : 'Disconnected';
+            s.className = connected ? 'status connected' : 'status disconnected';
+        }
+        updateData(event) {
+            this.data[`${event.host}:${event.user}`] = event;
+            this.render();
+            document.getElementById('last-update').textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+        }
+
+        // ---------- adjusting ----------
+        canAdjust() { return proto.viewer === 'adjuster'; }
+        uiOf(key) { return this.ui[key] ||= { phase: 'idle', draft: 0 }; }
+
+        async adjust(key, delta, sink) {
+            const obs = this.data[key];
+            const st = sink || this.uiOf(key);
+            if (!delta || Math.abs(delta) > MAX_ABS) { Object.assign(st, { phase: 'error', msg: 'Pick between 1 minute and 8 hours.' }); return this.render(); }
+            Object.assign(st, { phase: 'inflight', delta, started: Date.now() });
+            this.render();
+            const r = await stubAdjust(obs, delta);
+            if (r.transport === 'no_responders') Object.assign(st, { phase: 'error', msg: `${obs.host} is unreachable. No change made.` });
+            else if (r.transport === 'timeout') Object.assign(st, { phase: 'unknown', msg: `No answer from ${obs.host} within 15 s. The change may or may not have happened; check time left.` });
+            else if (r.status === 'error') Object.assign(st, { phase: 'error', msg: `${r.message} (${r.code}). No change made.` });
+            else {
+                Object.assign(st, { phase: 'done', before: r.left_day_before, after: r.observation.left_day });
+                this.uiOf(key).flash = true;
+                this.data[key] = r.observation; // fresh observation from the reply
+            }
+            st.draft = 0;
+            this.render();
+        }
+
+        statusMsg(key, st, dismissable = true) {
+            const obs = this.data[key];
+            const verb = (d) => d > 0 ? `Adding ${this.fmtShort(d)}` : `Removing ${this.fmtShort(-d)}`;
+            const x = dismissable ? `<button class="x" data-act="dismiss" data-key="${key}">✕</button>` : '';
+            switch (st.phase) {
+                case 'inflight': {
+                    const secs = Math.floor((Date.now() - st.started) / 1000);
+                    return `<div class="msg inflight"><span class="spin"></span><span>${verb(st.delta)} for ${obs.user}… waiting for ${obs.host}${secs >= 2 ? ` (${secs}s)` : ''}</span></div>`;
                 }
-            }
-
-            attemptReconnect() {
-                if (this.reconnectAttempts < this.maxReconnectAttempts) {
-                    this.reconnectAttempts++;
-                    console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-                    
-                    setTimeout(() => {
-                        this.connect();
-                    }, this.reconnectDelay * this.reconnectAttempts);
-                } else {
-                    console.log('Max reconnection attempts reached');
+                case 'done': {
+                    const changed = st.after - st.before;
+                    const head = st.delta > 0 ? `Added ${this.fmtShort(st.delta)}` : `Removed ${this.fmtShort(-st.delta)}`;
+                    if (changed === st.delta) return `<div class="msg ok">✓ <span>${head}. Time left: ${this.formatDuration(st.before)} → <b>${this.formatDuration(st.after)}</b></span>${x}</div>`;
+                    return `<div class="msg warn">⚠ <span>${head}, but time left only went ${this.formatDuration(st.before)} → <b>${this.formatDuration(st.after)}</b> (capped by Timekpr: zero, midnight, or allowed hours).</span>${x}</div>`;
                 }
-            }
-
-            updateConnectionStatus(connected) {
-                const statusElement = document.getElementById('connection-status');
-                if (connected) {
-                    statusElement.textContent = 'Connected';
-                    statusElement.className = 'status connected';
-                } else {
-                    statusElement.textContent = 'Disconnected';
-                    statusElement.className = 'status disconnected';
-                }
-            }
-
-            updateData(event) {
-                const key = `${event.host}:${event.user}`;
-                
-                this.data[key] = event;
-                
-                this.render();
-                this.updateLastUpdate();
-            }
-
-            render() {
-                const container = document.getElementById('user-container');
-                
-                if (Object.keys(this.data).length === 0) {
-                    container.innerHTML = '<div class="no-data">Waiting for screen time data...</div>';
-                    return;
-                }
-                
-                container.innerHTML = '';
-                
-                Object.values(this.data).forEach(userData => {
-                    const card = this.createUserCard(userData);
-                    container.appendChild(card);
-                });
-            }
-
-            createUserCard(userData) {
-                const card = document.createElement('div');
-                card.className = 'user-card';
-                
-                card.innerHTML = `
-                    <div class="user-header">
-                        <div class="user-name">${userData.user}</div>
-                        <div class="host-name">${userData.host}</div>
-                        <div class="timestamp" title="${new Date(userData.timestamp).toLocaleString()}">${this.formatRelativeTime(userData.timestamp)}</div>
-                    </div>
-                    <div class="stats">
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.left_day)}</div>
-                            <div class="stat-label">Left Today</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_day)}</div>
-                            <div class="stat-label">Spent Today</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_week)}</div>
-                            <div class="stat-label">Spent Week</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_month)}</div>
-                            <div class="stat-label">Spent Month</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_balance)}</div>
-                            <div class="stat-label">Balance</div>
-                        </div>
-                    </div>
-                `;
-                
-                return card;
-            }
-
-            formatDuration(seconds) {
-                const isNegative = seconds < 0;
-                const absSeconds = Math.abs(seconds);
-                let result = '';
-
-                if (absSeconds < 60) {
-                    result = `${absSeconds}s`;
-                } else if (absSeconds < 3600) {
-                    const minutes = Math.floor(absSeconds / 60);
-                    const remainingSeconds = absSeconds % 60;
-                    result = `${minutes}m ${remainingSeconds}s`;
-                } else {
-                    const hours = Math.floor(absSeconds / 3600);
-                    const minutes = Math.floor((absSeconds % 3600) / 60);
-                    result = `${hours}h ${minutes}m`;
-                }
-
-                return isNegative ? `-${result}` : result;
-            }
-
-            formatRelativeTime(timestamp) {
-                const date = new Date(timestamp);
-                const now = new Date();
-                const diffSeconds = Math.floor((now - date) / 1000);
-
-                if (diffSeconds < 5) {
-                    return 'current';
-                } else if (diffSeconds < 60) {
-                    return `${diffSeconds}s ago`;
-                } else if (diffSeconds < 3600) {
-                    const mins = Math.floor(diffSeconds / 60);
-                    return `${mins}m ago`;
-                } else if (diffSeconds < 86400) {
-                    const hours = Math.floor(diffSeconds / 3600);
-                    return `${hours}h ago`;
-                } else {
-                    const days = Math.floor(diffSeconds / 86400);
-                    return `${days}d ago`;
-                }
-            }
-
-            updateLastUpdate() {
-                const element = document.getElementById('last-update');
-                element.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
-            }
-
-            startPeriodicUpdate() {
-                setInterval(() => {
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.render();
-                    }
-                }, 30000);
+                case 'error': return `<div class="msg err">✗ <span>${st.msg}</span>${x}</div>`;
+                case 'unknown': return `<div class="msg unknown">? <span>${st.msg}</span>${x}</div>`;
+                default: return '';
             }
         }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            new ScreenTimeMonitor();
+        onClick(e) {
+            const b = e.target.closest('[data-act]');
+            if (!b || b.tagName === 'INPUT') return;
+            const key = b.dataset.key, d = Number(b.dataset.delta || 0), st = key ? this.uiOf(key) : null;
+            switch (b.dataset.act) {
+                case 'dismiss': st.phase = 'idle'; break;
+                // A
+                case 'a-preset': if (d > 0) return this.adjust(key, d); Object.assign(st, { phase: 'confirm', delta: d }); break;
+                case 'a-confirm': return this.adjust(key, st.delta);
+                case 'a-cancel': st.phase = 'idle'; break;
+                // B
+                case 'b-step': st.draft = Math.max(-MAX_ABS, Math.min(MAX_ABS, st.draft + d)); if (st.phase !== 'inflight') st.phase = 'idle'; break;
+                case 'b-reset': st.draft = 0; break;
+                case 'b-apply': return this.adjust(key, st.draft);
+                // C
+                case 'c-open': this.dialog = { key, sign: 1, minutes: 15, custom: '', phase: 'pick' }; break;
+                case 'c-sign': this.dialog.sign = d; break;
+                case 'c-min': this.dialog.minutes = d; this.dialog.custom = ''; break;
+                case 'c-close': if (this.dialog.phase !== 'inflight') this.dialog = null; break;
+                case 'c-go': { const dl = this.dialog; return this.adjust(dl.key, dl.sign * this.cMinutes() * 60, dl); }
+            }
+            this.render();
+        }
+        onInput(e) {
+            const t = e.target;
+            if (t.dataset.act === 'b-custom') { // typing ± minutes: patch only the action buttons so focus survives
+                const st = this.uiOf(t.dataset.key), m = parseInt(t.value, 10);
+                st.draft = Number.isFinite(m) ? m * 60 : 0;
+                t.closest('.user-card').querySelector('.b-actions').innerHTML = this.bActions(t.dataset.key, st);
+                this.renderState();
+            }
+            if (t.dataset.act === 'c-custom') { this.dialog.custom = t.value; this.renderDialog(); }
+        }
+        cMinutes() { const c = parseInt(this.dialog.custom, 10); return Number.isFinite(c) && c > 0 ? c : this.dialog.minutes; }
+
+        // ---------- rendering ----------
+        render() {
+            const container = document.getElementById('user-container');
+            document.getElementById('whoami').textContent = proto.viewer === 'adjuster' ? 'thomas@example.com (adjuster)' : 'guest@example.com (not an adjuster)';
+            const focused = document.activeElement;
+            if (focused && focused.tagName === 'INPUT' && container.contains(focused)) { this.renderState(); return; } // don't clobber typing
+            if (Object.keys(this.data).length === 0) { container.innerHTML = '<div class="no-data">Waiting for screen time data...</div>'; return; }
+            container.innerHTML = '';
+            for (const [key, obs] of Object.entries(this.data)) container.appendChild(this.createUserCard(key, obs));
+            this.renderDialog();
+            this.renderState();
+        }
+
+        createUserCard(key, d) {
+            const card = document.createElement('div');
+            card.className = 'user-card';
+            const st = this.uiOf(key);
+            const flash = st.flash ? ' flash' : ''; st.flash = false;
+            const header = `
+                <div class="user-header">
+                    <div class="user-name">${d.user}</div>
+                    <div class="host-name">${d.host}</div>
+                    <div class="timestamp" title="${new Date(d.timestamp).toLocaleString()}">${this.formatRelativeTime(d.timestamp)}</div>
+                    ${proto.variant === 'C' ? this.cButton(key) : ''}
+                </div>`;
+            const stat = (v, l, cls = '') => `<div class="stat${cls}"><div class="stat-value">${this.formatDuration(v)}</div><div class="stat-label">${l}</div></div>`;
+            const rest = stat(d.spent_day, 'Spent Today') + stat(d.spent_week, 'Spent Week') + stat(d.spent_month, 'Spent Month') + stat(d.spent_balance, 'Balance');
+
+            if (proto.variant === 'B') card.innerHTML = header + this.bHero(key, d, st, flash) + `<div class="stats b-stats">${rest}</div>`;
+            else if (proto.variant === 'A') card.innerHTML = header + `<div class="stats">${stat(d.left_day, 'Left Today', flash)}${rest}</div>` + this.aControls(key, d, st);
+            else card.innerHTML = header + `<div class="stats">${stat(d.left_day, 'Left Today', flash)}${rest}</div>`
+                + (this.dialog?.phase === 'done' && this.dialog.key === key ? this.statusMsg(key, this.dialog, false) : '');
+            return card;
+        }
+
+        // Variant A: one row of preset chips under the stats; removal needs an inline confirm, adding doesn't.
+        aControls(key, d, st) {
+            if (proto.viewer === 'hidden') return '';
+            const dis = this.canAdjust() && st.phase !== 'inflight' ? '' : 'disabled';
+            const tip = this.canAdjust() ? '' : 'title="Only adjusters can change time left"';
+            if (st.phase === 'confirm') {
+                return `<div class="a-confirm"><span>Remove <b>${this.fmtShort(-st.delta)}</b> from ${d.user}'s time left today?</span>
+                    <button class="btn danger" data-act="a-confirm" data-key="${key}">Remove ${this.fmtShort(-st.delta)}</button>
+                    <button class="btn" data-act="a-cancel" data-key="${key}">Cancel</button></div>`;
+            }
+            const chip = (delta, cls) => `<button class="btn ${cls}" ${dis} ${tip} data-act="a-preset" data-key="${key}" data-delta="${delta}">${delta > 0 ? '+' : '−'}${this.fmtShort(Math.abs(delta))}</button>`;
+            return `<div class="a-row"><span class="lbl">Time left today</span>${chip(-900, 'remove')}${chip(900, 'add')}${chip(1800, 'add')}${chip(3600, 'add')}</div>`
+                + (this.canAdjust() ? '' : '<div class="note">Only adjusters can change time left.</div>')
+                + this.statusMsg(key, st);
+        }
+
+        // Variant B: time left becomes a hero with −/+ that build a pending delta (or type minutes), then Apply.
+        bActions(key, st) {
+            const can = this.canAdjust() && st.phase !== 'inflight', p = st.draft;
+            const label = p < 0 ? `Remove ${this.fmtShort(-p)}` : p > 0 ? `Add ${this.fmtShort(p)}` : 'Apply';
+            return `<button class="btn ${p < 0 ? 'danger' : 'primary'}" ${p && can ? '' : 'disabled'} data-act="b-apply" data-key="${key}">${label}</button>
+                    <button class="btn" ${p && can ? '' : 'disabled'} data-act="b-reset" data-key="${key}">Reset</button>`;
+        }
+        bHero(key, d, st, flash) {
+            const show = proto.viewer !== 'hidden';
+            const dis = this.canAdjust() && st.phase !== 'inflight' ? '' : 'disabled';
+            const tip = this.canAdjust() ? '' : 'title="Only adjusters can change time left"';
+            const p = st.draft;
+            const pending = !show ? '' : (p === 0
+                ? `<span style="color:#6c757d">or type <input data-act="b-custom" data-key="${key}" placeholder="± min" ${dis}> min</span>`
+                : `${p > 0 ? '+' : '−'}${this.fmtShort(Math.abs(p))} → about ${this.formatDuration(Math.max(0, d.left_day + p))}`);
+            const step = (delta, sym) => show ? `<button class="round" ${dis} ${tip} data-act="b-step" data-key="${key}" data-delta="${delta}">${sym}</button>` : '';
+            return `<div class="b-hero${flash}">
+                    ${step(-900, '−')}
+                    <div class="center"><div class="big">${this.formatDuration(d.left_day)}</div><div class="stat-label">Left Today</div>
+                        <div class="pending ${p > 0 ? 'add' : p < 0 ? 'remove' : ''}">${pending}</div></div>
+                    ${step(900, '+')}
+                </div>`
+                + (show ? `<div class="b-actions">${this.bActions(key, st)}</div>` : '')
+                + (show && !this.canAdjust() ? '<div class="note" style="text-align:center;margin:-4px 0 10px">Only adjusters can change time left.</div>' : '')
+                + this.statusMsg(key, st);
+        }
+
+        // Variant C: a single "Adjust time…" button in the header opens a dialog with review + result.
+        cButton(key) {
+            if (proto.viewer === 'hidden') return '';
+            return `<button class="btn" ${this.canAdjust() ? '' : 'disabled title="Only adjusters can change time left"'} data-act="c-open" data-key="${key}">Adjust time…</button>`;
+        }
+        renderDialog() {
+            const root = document.getElementById('dialog-root');
+            const dl = this.dialog;
+            if (!dl || proto.variant !== 'C') { root.innerHTML = ''; return; }
+            const d = this.data[dl.key];
+            const mins = this.cMinutes(), delta = dl.sign * mins * 60;
+            let body;
+            if (dl.phase === 'pick') {
+                const pre = (m) => `<button class="btn ${!dl.custom && dl.minutes === m ? 'on' : ''}" data-act="c-min" data-delta="${m}">${this.fmtShort(m * 60)}</button>`;
+                body = `
+                    <div class="c-seg">
+                        <button class="add ${dl.sign > 0 ? 'on' : ''}" data-act="c-sign" data-delta="1">Add time</button>
+                        <button class="remove ${dl.sign < 0 ? 'on' : ''}" data-act="c-sign" data-delta="-1">Remove time</button>
+                    </div>
+                    <div class="c-presets">${pre(15)}${pre(30)}${pre(60)}${pre(120)}
+                        <input data-act="c-custom" placeholder="other" value="${dl.custom}"> min</div>
+                    <div class="c-review">${dl.sign > 0 ? 'Add' : 'Remove'} <b>${this.fmtShort(mins * 60)}</b>: ${this.formatDuration(d.left_day)} → about <b>${this.formatDuration(Math.max(0, d.left_day + delta))}</b>
+                        <div class="note">Timekpr may cap the result (zero, midnight, allowed hours).</div></div>
+                    <div class="c-foot"><button class="btn" data-act="c-close">Cancel</button>
+                        <button class="btn ${dl.sign > 0 ? 'primary' : 'danger'}" ${mins * 60 > MAX_ABS ? 'disabled' : ''} data-act="c-go">${dl.sign > 0 ? 'Add' : 'Remove'} ${this.fmtShort(mins * 60)}</button></div>`;
+            } else if (dl.phase === 'inflight') {
+                body = this.statusMsg(dl.key, dl, false) + `<div class="c-foot" style="margin-top:12px"><button class="btn" disabled>Close</button></div>`;
+            } else if (dl.phase === 'done') {
+                const capped = dl.after - dl.before !== dl.delta;
+                body = `<div class="c-result">${capped ? '⚠ Capped by Timekpr (zero, midnight, or allowed hours)' : '✓ Done'}<div class="ba">${this.formatDuration(dl.before)} → ${this.formatDuration(dl.after)}</div>time left today for ${d.user}</div>
+                    <div class="c-foot"><button class="btn primary" data-act="c-close">Close</button></div>`;
+            } else {
+                body = this.statusMsg(dl.key, dl, false) + `<div class="c-foot" style="margin-top:12px"><button class="btn" data-act="c-close">Close</button></div>`;
+            }
+            if (document.activeElement?.dataset?.act === 'c-custom' && dl.phase === 'pick') { // keep focus while typing
+                const tmp = document.createElement('div'); tmp.innerHTML = body;
+                root.querySelector('.c-review').replaceWith(tmp.querySelector('.c-review'));
+                root.querySelector('.c-foot').replaceWith(tmp.querySelector('.c-foot'));
+                root.querySelectorAll('.c-presets .btn').forEach(b => b.classList.toggle('on', !dl.custom && Number(b.dataset.delta) === dl.minutes));
+                return;
+            }
+            root.innerHTML = `<div class="c-backdrop"><div class="c-dialog"><h2>Adjust time left today</h2><div class="sub">${d.user} on ${d.host} · now ${this.formatDuration(d.left_day)}</div>${body}</div></div>`;
+        }
+
+        renderState() {
+            const ui = Object.fromEntries(Object.entries(this.ui).map(([k, v]) => [k, { ...v, started: undefined, flash: undefined }]));
+            document.getElementById('proto-state').textContent = 'PROTOTYPE STATE\n' + JSON.stringify({
+                variant: proto.variant, viewer: proto.viewer, outcome: proto.outcome,
+                ui, dialog: this.dialog, lastRequest: proto.lastRequest, lastReply: proto.lastReply,
+            }, null, 1);
+        }
+
+        fmtShort(s) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h && m ? `${h}h${m}m` : h ? `${h}h` : `${m}m`; }
+        formatDuration(seconds) {
+            const isNegative = seconds < 0, a = Math.abs(seconds);
+            let r;
+            if (a < 60) r = `${a}s`;
+            else if (a < 3600) r = `${Math.floor(a / 60)}m ${a % 60}s`;
+            else r = `${Math.floor(a / 3600)}h ${Math.floor((a % 3600) / 60)}m`;
+            return isNegative ? `-${r}` : r;
+        }
+        formatRelativeTime(timestamp) {
+            const s = Math.floor((new Date() - new Date(timestamp)) / 1000);
+            if (s < 5) return 'current';
+            if (s < 60) return `${s}s ago`;
+            if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+            if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+            return `${Math.floor(s / 86400)}d ago`;
+        }
+        startPeriodicUpdate() {
+            setInterval(() => this.render(), 30000);
+            setInterval(() => { // tick the in-flight elapsed counter
+                if (Object.values(this.ui).some(u => u.phase === 'inflight') || this.dialog?.phase === 'inflight') this.render();
+            }, 1000);
+        }
+    }
+
+    // ---------- prototype switcher ----------
+    document.addEventListener('DOMContentLoaded', () => {
+        const app = new ScreenTimeMonitor();
+        const keys = Object.keys(VARIANTS);
+        const vl = document.getElementById('vlabel');
+        const show = () => { vl.textContent = `${proto.variant} (${VARIANTS[proto.variant]})`; app.dialog = null; app.render(); };
+        const cycle = (n) => { proto.variant = keys[(keys.indexOf(proto.variant) + n + keys.length) % keys.length]; setParam('variant', proto.variant); show(); };
+        document.getElementById('pv').onclick = () => cycle(-1);
+        document.getElementById('nv').onclick = () => cycle(1);
+        document.addEventListener('keydown', (e) => {
+            if (e.target.closest('input, textarea, select, [contenteditable]')) return;
+            if (e.key === 'ArrowLeft') cycle(-1);
+            if (e.key === 'ArrowRight') cycle(1);
         });
+        for (const id of ['viewer', 'outcome']) {
+            const el = document.getElementById(id);
+            el.value = proto[id];
+            el.onchange = () => { proto[id] = el.value; setParam(id, el.value); app.render(); };
+        }
+        show();
+    });
     </script>
 </body>
 </html>
