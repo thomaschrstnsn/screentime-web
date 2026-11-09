@@ -38,8 +38,6 @@ cargo run -- --help
 
 - `-b, --bind <BIND>`: Address to bind the server to (default: "127.0.0.1:3000")
 - `-u, --nats-url <NATS_URL>`: NATS server URL (default: "nats://localhost:4222")
-- `-s, --nats-subject <NATS_SUBJECT>`: NATS subject to subscribe to (default: "time.obs.>")
-- `--nats-stream <NATS_STREAM>`: NATS JetStream stream name (default: "OBSERVATIONS")
 
 ## Configuration
 
@@ -48,8 +46,6 @@ The application can be configured via command-line arguments or environment vari
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `NATS_URL` | NATS server URL | `nats://localhost:4222` |
-| `NATS_SUBJECT` | NATS subject pattern | `time.obs.>` |
-| `NATS_STREAM` | JetStream stream name | `OBSERVATIONS` |
 | `CF_ACCESS_TEAM` | Cloudflare Access team name | (Optional) |
 | `CF_ACCESS_AUD` | Cloudflare Access audience tag | (Optional) |
 
@@ -59,7 +55,7 @@ To enable Cloudflare Access authentication, set the `CF_ACCESS_TEAM` and `CF_ACC
 
 ## Data Format
 
-The application expects NATS messages on the subject `time.obs.<host>.<user>` (captured by the default `time.obs.>` wildcard) with a JSON payload containing:
+The application reads the `OBSERVATIONS` JetStream stream (created by the collector; the web waits for it, retrying every 5 s) and expects messages on the subject `time.obs.<host>.<user>` with a JSON payload containing:
 
 ```json
 {

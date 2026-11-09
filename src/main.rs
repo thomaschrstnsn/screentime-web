@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_nats::jetstream::{self, consumer::DeliverPolicy};
@@ -32,13 +33,14 @@ struct Config {
 
     #[arg(short = 'u', long, default_value = "nats://localhost:4222")]
     nats_url: String,
-
-    #[arg(short = 's', long, default_value = "time.obs.>")]
-    nats_subject: String,
-
-    #[arg(long, default_value = "OBSERVATIONS")]
-    nats_stream: String,
 }
+
+/// JetStream stream holding observations; created and owned by the collector.
+const OBSERVATIONS_STREAM: &str = "OBSERVATIONS";
+/// Subject filter for observations, published as `time.obs.<host>.<user>`.
+const OBSERVATIONS_SUBJECT: &str = "time.obs.>";
+/// How long to wait between attempts to find the observations stream.
+const STREAM_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenTimeEvent {
@@ -66,8 +68,6 @@ async fn main() -> Result<()> {
     let config = Config::parse();
 
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| config.nats_url.clone());
-    let nats_subject = env::var("NATS_SUBJECT").unwrap_or_else(|_| config.nats_subject.clone());
-    let nats_stream = env::var("NATS_STREAM").unwrap_or_else(|_| config.nats_stream.clone());
 
     tracing::info!("Connecting to NATS at: {}", nats_url);
     let nats_client = async_nats::connect(&nats_url).await?;
@@ -82,10 +82,8 @@ async fn main() -> Result<()> {
     };
 
     let nats_state = app_state.clone();
-    let nats_subject_clone = nats_subject.clone();
-    let nats_stream_clone = nats_stream.clone();
     tokio::spawn(async move {
-        subscribe_to_screentime(nats_state, nats_subject_clone, nats_stream_clone).await;
+        subscribe_to_screentime(nats_state).await;
     });
 
     // Load Cloudflare Access config from environment (optional)
@@ -117,24 +115,41 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: String) {
-    // Get the stream
-    let stream = match state.jetstream.get_stream(stream_name.clone()).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to get JetStream stream '{}': {}", stream_name, e);
-            return;
+/// Runs `op` until it succeeds, warning and sleeping `interval` after each failure.
+async fn retry_every<T, E, F, Fut>(interval: Duration, label: &str, mut op: F) -> T
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    loop {
+        match op().await {
+            Ok(v) => return v,
+            Err(e) => {
+                tracing::warn!("{} unavailable, retrying in {:?}: {}", label, interval, e);
+                tokio::time::sleep(interval).await;
+            }
         }
-    };
+    }
+}
 
-    tracing::info!("Found JetStream stream: {}", stream_name);
+async fn subscribe_to_screentime(state: AppState) {
+    // The collector creates the stream; wait for it rather than giving up
+    let stream = retry_every(
+        STREAM_RETRY_INTERVAL,
+        &format!("JetStream stream '{}'", OBSERVATIONS_STREAM),
+        || state.jetstream.get_stream(OBSERVATIONS_STREAM),
+    )
+    .await;
+
+    tracing::info!("Found JetStream stream: {}", OBSERVATIONS_STREAM);
 
     // Create a pull consumer with LastPerSubject policy
     let consumer = match stream
         .create_consumer(jetstream::consumer::pull::Config {
             durable_name: None, // Ephemeral consumer
             deliver_policy: DeliverPolicy::LastPerSubject,
-            filter_subject: subject.clone(),
+            filter_subject: OBSERVATIONS_SUBJECT.to_string(),
             ..Default::default()
         })
         .await
@@ -146,7 +161,10 @@ async fn subscribe_to_screentime(state: AppState, subject: String, stream_name: 
         }
     };
 
-    tracing::info!("Created JetStream consumer for subject: {}", subject);
+    tracing::info!(
+        "Created JetStream consumer for subject: {}",
+        OBSERVATIONS_SUBJECT
+    );
 
     // Get messages stream
     let mut messages = match consumer.messages().await {
@@ -315,5 +333,30 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_every_waits_interval_between_failures_and_returns_first_ok() {
+        let attempts = AtomicU32::new(0);
+        let started = tokio::time::Instant::now();
+
+        let result: u32 = retry_every(Duration::from_secs(5), "thing", || async {
+            let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if n < 3 {
+                Err(anyhow::anyhow!("not yet"))
+            } else {
+                Ok(n)
+            }
+        })
+        .await;
+
+        assert_eq!(result, 3);
+        assert_eq!(started.elapsed(), Duration::from_secs(10));
     }
 }
