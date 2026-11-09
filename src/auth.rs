@@ -1,14 +1,15 @@
-//! Cloudflare Access authentication middleware
+//! Request identity middleware
 //!
-//! This module provides optional JWT validation for requests coming through
-//! Cloudflare Access. When the `Cf-Access-Jwt-Assertion` header is present,
-//! the JWT is validated against Cloudflare's public keys. If valid, the user's
-//! identity is attached to the request. If the header is absent, the request
-//! proceeds anonymously.
+//! This module attaches the viewer's identity (or `None`) to every request.
+//! Under Cloudflare Access, when the `Cf-Access-Jwt-Assertion` header is
+//! present, the JWT is validated against Cloudflare's public keys. If valid,
+//! the user's identity is attached to the request. If the header is absent,
+//! the request proceeds anonymously.
 //!
 //! Environment variables:
 //! - `CF_ACCESS_TEAM`: Your Cloudflare Access team name
 //! - `CF_ACCESS_AUD`: Your application's audience tag from CF Access dashboard
+//! - `DEV_IDENTITY` (debug builds only): attach this email to every request
 
 use axum::{
     body::Body,
@@ -69,6 +70,20 @@ impl JwksCache {
             inner: Arc::new(RwLock::new(None)),
             team,
         }
+    }
+
+    /// Create a cache already holding `jwks`, so tests need no network
+    #[cfg(test)]
+    pub fn with_jwks(team: String, jwks: JwkSet) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(jwks))),
+            team,
+        }
+    }
+
+    /// The Cloudflare Access team name
+    pub fn team(&self) -> &str {
+        &self.team
     }
 
     /// Get the JWKS URL for this team
@@ -196,27 +211,36 @@ pub struct CfAccessConfig {
     pub audience: String,
 }
 
-impl CfAccessConfig {
-    /// Create config from environment variables
-    ///
-    /// Returns None if CF_ACCESS_TEAM or CF_ACCESS_AUD are not set
-    pub fn from_env() -> Option<Self> {
-        let team = std::env::var("CF_ACCESS_TEAM").ok()?;
-        let audience = std::env::var("CF_ACCESS_AUD").ok()?;
+/// Decide how requests get their identity from `CF_ACCESS_TEAM`, `CF_ACCESS_AUD`
+/// and (debug builds only) `--dev-identity`. Empty values count as unset.
+///
+/// CF Access is enabled only when both team and audience are set. A dev
+/// identity is refused alongside either, so it can't leak into a CF deployment.
+pub fn resolve_auth_mode(
+    cf_team: Option<String>,
+    cf_aud: Option<String>,
+    #[cfg(debug_assertions)] dev_identity: Option<String>,
+) -> Result<AuthMode, String> {
+    let cf_team = cf_team.filter(|s| !s.is_empty());
+    let cf_aud = cf_aud.filter(|s| !s.is_empty());
 
-        if team.is_empty() || audience.is_empty() {
-            return None;
+    #[cfg(debug_assertions)]
+    if let Some(email) = dev_identity.filter(|s| !s.is_empty()) {
+        if cf_team.is_some() || cf_aud.is_some() {
+            return Err(
+                "--dev-identity (DEV_IDENTITY) cannot be combined with CF_ACCESS_TEAM/CF_ACCESS_AUD"
+                    .to_string(),
+            );
         }
+        return Ok(AuthMode::DevIdentity(email));
+    }
 
-        tracing::info!(
-            "Cloudflare Access authentication enabled for team: {}",
-            team
-        );
-
-        Some(Self {
+    match (cf_team, cf_aud) {
+        (Some(team), Some(audience)) => Ok(AuthMode::CfAccess(CfAccessConfig {
             jwks_cache: JwksCache::new(team),
             audience,
-        })
+        })),
+        _ => Ok(AuthMode::Anonymous),
     }
 }
 
@@ -227,23 +251,41 @@ fn extract_cf_jwt(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
 }
 
-/// Authentication middleware for Cloudflare Access
+/// How requests get their identity
+#[derive(Clone)]
+pub enum AuthMode {
+    /// CF Access not configured: every request is anonymous
+    Anonymous,
+    /// Validate CF Access JWTs when present
+    CfAccess(CfAccessConfig),
+    /// Local development only: attach this email to every request
+    #[cfg(debug_assertions)]
+    DevIdentity(String),
+}
+
+/// Authentication middleware
 ///
-/// Behavior:
+/// Behavior under `AuthMode::CfAccess`:
 /// - No JWT header present: Request proceeds with no identity (anonymous)
 /// - Valid JWT present: Identity is attached to request extensions
 /// - Invalid JWT present: Returns 401 Unauthorized
-pub async fn cf_access_middleware(
-    config: Option<CfAccessConfig>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Response {
-    // If CF Access is not configured, proceed without auth
-    let config = match config {
-        Some(c) => c,
-        None => {
+pub async fn auth_middleware(mode: AuthMode, mut request: Request<Body>, next: Next) -> Response {
+    let config = match mode {
+        AuthMode::CfAccess(c) => c,
+        AuthMode::Anonymous => {
             tracing::debug!("CF Access not configured, proceeding anonymously");
             request.extensions_mut().insert(None::<CloudflareIdentity>);
+            return next.run(request).await;
+        }
+        #[cfg(debug_assertions)]
+        AuthMode::DevIdentity(email) => {
+            request.extensions_mut().insert(Some(CloudflareIdentity {
+                email,
+                sub: "dev-identity".to_string(),
+                identity_nonce: None,
+                iat: 0,
+                exp: u64::MAX,
+            }));
             return next.run(request).await;
         }
     };
@@ -289,11 +331,41 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn test_config_from_env_missing() {
-        // Should return None when env vars are not set
-        unsafe { std::env::remove_var("CF_ACCESS_TEAM") };
-        unsafe { std::env::remove_var("CF_ACCESS_AUD") };
-        assert!(CfAccessConfig::from_env().is_none());
+    fn dev_identity_is_refused_alongside_cf_access_settings() {
+        let dev = || Some("me@example.com".to_string());
+        for (team, aud) in [
+            (Some("myteam"), None),
+            (None, Some("my-aud")),
+            (Some("myteam"), Some("my-aud")),
+        ] {
+            let result = resolve_auth_mode(team.map(Into::into), aud.map(Into::into), dev());
+            let err = result.err().expect("should refuse to start");
+            assert!(err.contains("--dev-identity"), "unclear error: {err}");
+        }
+    }
+
+    #[test]
+    fn cf_access_needs_both_team_and_audience() {
+        let resolve = |team: Option<&str>, aud: Option<&str>| {
+            resolve_auth_mode(
+                team.map(Into::into),
+                aud.map(Into::into),
+                #[cfg(debug_assertions)]
+                None,
+            )
+            .unwrap()
+        };
+        assert!(matches!(resolve(None, None), AuthMode::Anonymous));
+        assert!(matches!(resolve(Some("myteam"), None), AuthMode::Anonymous));
+        assert!(matches!(
+            resolve(Some("myteam"), Some("")),
+            AuthMode::Anonymous
+        ));
+        assert!(matches!(
+            resolve(Some("myteam"), Some("my-aud")),
+            AuthMode::CfAccess(_)
+        ));
     }
 }

@@ -48,10 +48,17 @@ The application can be configured via command-line arguments or environment vari
 | `NATS_URL` | NATS server URL | `nats://localhost:4222` |
 | `CF_ACCESS_TEAM` | Cloudflare Access team name | (Optional) |
 | `CF_ACCESS_AUD` | Cloudflare Access audience tag | (Optional) |
+| `DEV_IDENTITY` | Debug builds only: see [Local development](#local-development) | (Optional) |
 
 ### Cloudflare Access Authentication
 
 To enable Cloudflare Access authentication, set the `CF_ACCESS_TEAM` and `CF_ACCESS_AUD` environment variables. When enabled, the application will validate the `Cf-Access-Jwt-Assertion` header on incoming requests.
+
+A request with a valid JWT is an **adjuster**: the Cloudflare Access policy is the allowlist. A request without the header is let through as an anonymous viewer, so viewing directly over the LAN keeps working.
+
+### Local development
+
+Debug builds accept `--dev-identity <email>` (env `DEV_IDENTITY`), which attaches that identity to every request so you can act as an adjuster without Cloudflare, e.g. `cargo run -- --dev-identity me@example.com`. Release builds don't have the flag, and the web refuses to start when it is combined with `CF_ACCESS_TEAM`/`CF_ACCESS_AUD`.
 
 ## Data Format
 
@@ -74,6 +81,7 @@ Values are in seconds.
 - `/` - Main web interface
 - `/ws` - WebSocket endpoint for real-time updates
 - `/api/screentime` - REST API to fetch current screen time data
+- `/api/me` - The viewer's identity: `{"email": "...", "adjuster": true}`, or `{"email": null, "adjuster": false}` when anonymous
 - `/static/` - Static file serving
 
 ## License
