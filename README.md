@@ -82,6 +82,7 @@ Values are in seconds.
 - `/ws` - WebSocket endpoint for real-time updates
 - `/api/screentime` - REST API to fetch current screen time data
 - `/api/me` - The viewer's identity: `{"email": "...", "adjuster": true}`, or `{"email": null, "adjuster": false}` when anonymous
+- `POST /api/time-adjustments` - Time adjustment by an adjuster: `{"host", "user", "delta_seconds"}` (non-zero, within ±28800). Sent to the collector as a NATS request on `time.adjust.<host>.<user>`, waiting up to 15 s. Answers 200 with the collector's reply (`status: ok` / `error`), `unreachable` (no collector listening, no change made) or `timeout` (the change may or may not have happened), always with the `request_id` web made. Refusals are text: 401 without a verified identity, 400 for a bad body, 404 for a `host:user` web has no observations for, 415 unless the body is `application/json`
 - `/static/` - Static file serving
 
 ## License

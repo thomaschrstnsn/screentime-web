@@ -138,6 +138,125 @@
         .updating {
             animation: pulse 1s infinite;
         }
+
+        /* Time left today as the hero, with time adjustment controls for adjusters */
+        .hero {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 18px;
+            padding: 14px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+
+        .hero .center {
+            text-align: center;
+            min-width: 170px;
+        }
+
+        .hero .big {
+            font-size: 2em;
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .hero .pending {
+            font-size: 0.95em;
+            margin-top: 4px;
+            min-height: 1.4em;
+        }
+
+        .hero .pending.add { color: #155724; }
+        .hero .pending.remove { color: #842029; }
+
+        .hero .typed {
+            font-size: 0.85em;
+            color: #6c757d;
+            margin-top: 4px;
+        }
+
+        .hero .typed input {
+            width: 70px;
+            font: inherit;
+            text-align: right;
+            padding: 2px 4px;
+        }
+
+        .flash { animation: flash 1.2s; }
+        @keyframes flash { 0% { background: #fff3a0; } 100% { background: #f8f9fa; } }
+
+        button { font: inherit; cursor: pointer; }
+        button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+        .round {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            font-size: 1.5em;
+            line-height: 1;
+            border: 1px solid #ced4da;
+            background: white;
+        }
+
+        .actions {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            margin-bottom: 12px;
+        }
+
+        .btn {
+            border: 1px solid #ced4da;
+            background: white;
+            border-radius: 6px;
+            padding: 6px 12px;
+        }
+
+        .btn:hover:not(:disabled) { background: #f1f3f5; }
+        .btn.primary { background: #007bff; border-color: #007bff; color: white; }
+        .btn.danger { background: #dc3545; border-color: #dc3545; color: white; }
+
+        .msg {
+            margin-bottom: 12px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 0.9em;
+            display: flex;
+            gap: 8px;
+            align-items: flex-start;
+        }
+
+        .msg .dismiss {
+            margin-left: auto;
+            border: none;
+            background: none;
+            color: inherit;
+            opacity: 0.6;
+        }
+
+        .msg.inflight { background: #e7f1ff; color: #084298; }
+        .msg.ok { background: #d1e7dd; color: #0f5132; }
+        .msg.warn { background: #fff3cd; color: #664d03; }
+        .msg.err { background: #f8d7da; color: #842029; }
+        .msg.unknown { background: #e2e3e5; color: #41464b; }
+
+        .spin {
+            display: inline-block;
+            flex: none;
+            width: 12px;
+            height: 12px;
+            border: 2px solid currentColor;
+            border-right-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-top: 3px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .stats.small .stat-value { font-size: 1em; }
     </style>
 </head>
 <body>
@@ -154,42 +273,333 @@
     </div>
 
     <script>
+        /** Largest time adjustment either way (8 h); web and the collector enforce the same bound. */
+        const MAX_DELTA_SECONDS = 8 * 60 * 60;
+        /** One tap on − or +. */
+        const STEP_SECONDS = 15 * 60;
+        /** Web's own refusals of a time adjustment; anything else unexpected is Cloudflare. */
+        const WEB_REFUSALS = [400, 404, 415];
+        const SESSION_EXPIRED = 'Your Cloudflare session may have expired. Reload the page to sign in again. No change was made.';
+
+        /** Builds an element; `children` are nodes or strings (set as text, never HTML). */
+        function el(tag, attrs = {}, ...children) {
+            const node = document.createElement(tag);
+            for (const [k, v] of Object.entries(attrs)) {
+                if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+                else node.setAttribute(k, v);
+            }
+            node.append(...children);
+            return node;
+        }
+
+        function clampDelta(seconds) {
+            return Math.max(-MAX_DELTA_SECONDS, Math.min(MAX_DELTA_SECONDS, seconds));
+        }
+
+        /** "15m", "1h", "1h 30m" for a positive number of seconds. */
+        function formatShort(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.round((seconds % 3600) / 60);
+            if (h && m) return `${h}h ${m}m`;
+            return h ? `${h}h` : `${m}m`;
+        }
+
+        /** "Add 30m" / "Remove 15m" style label for a signed delta, from verbs per sign. */
+        function describeDelta(delta, add, remove) {
+            return `${delta > 0 ? add : remove} ${formatShort(Math.abs(delta))}`;
+        }
+
+        function formatDuration(seconds) {
+            const isNegative = seconds < 0;
+            const absSeconds = Math.abs(seconds);
+            let result = '';
+
+            if (absSeconds < 60) {
+                result = `${absSeconds}s`;
+            } else if (absSeconds < 3600) {
+                const minutes = Math.floor(absSeconds / 60);
+                const remainingSeconds = absSeconds % 60;
+                result = `${minutes}m ${remainingSeconds}s`;
+            } else {
+                const hours = Math.floor(absSeconds / 3600);
+                const minutes = Math.floor((absSeconds % 3600) / 60);
+                result = `${hours}h ${minutes}m`;
+            }
+
+            return isNegative ? `-${result}` : result;
+        }
+
+        function formatRelativeTime(timestamp) {
+            const diffSeconds = Math.floor((new Date() - new Date(timestamp)) / 1000);
+
+            if (diffSeconds < 5) return 'current';
+            if (diffSeconds < 60) return `${diffSeconds}s ago`;
+            if (diffSeconds < 3600) return `${Math.floor(diffSeconds / 60)}m ago`;
+            if (diffSeconds < 86400) return `${Math.floor(diffSeconds / 3600)}h ago`;
+            return `${Math.floor(diffSeconds / 86400)}d ago`;
+        }
+
+        /**
+         * Sends a time adjustment and turns every way it can end into a message:
+         * `{kind: 'ok' | 'warn' | 'err' | 'unknown', text, before?, after?, observation?}`.
+         */
+        async function requestAdjustment(host, user, delta) {
+            let response;
+            try {
+                response = await fetch('/api/time-adjustments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, user, delta_seconds: delta }),
+                    redirect: 'error', // Cloudflare's login redirect means the session is gone
+                });
+            } catch {
+                return { kind: 'err', text: SESSION_EXPIRED };
+            }
+
+            const isJson = (response.headers.get('content-type') || '').startsWith('application/json');
+            if (response.ok && isJson) {
+                return describeReply(await response.json(), host, delta);
+            }
+            if (WEB_REFUSALS.includes(response.status)) {
+                return { kind: 'err', text: `${await response.text()} (HTTP ${response.status}). No change made.` };
+            }
+            return { kind: 'err', text: SESSION_EXPIRED };
+        }
+
+        function describeReply(reply, host, delta) {
+            switch (reply.status) {
+                case 'ok': {
+                    const before = reply.left_day_before;
+                    const after = reply.observation.left_day;
+                    const done = describeDelta(delta, 'Added', 'Removed');
+                    if (after - before === delta) {
+                        return { kind: 'ok', text: `${done}. Time left: `, before, after, observation: reply.observation };
+                    }
+                    return {
+                        kind: 'warn',
+                        text: `${done}, but time left only went `,
+                        before, after,
+                        suffix: ' (capped by Timekpr: zero, midnight, or allowed hours).',
+                        observation: reply.observation,
+                    };
+                }
+                case 'error':
+                    return { kind: 'err', text: `${reply.message} (${reply.code}). No change made.` };
+                case 'unreachable':
+                    return { kind: 'err', text: `${host} is unreachable. No change made.` };
+                case 'timeout':
+                    return { kind: 'unknown', text: `No answer from ${host} within 15 s. The change may or may not have happened; check time left.` };
+                case 'unreadable':
+                    return { kind: 'unknown', text: `${host} sent an answer web could not read. The change may or may not have happened; check time left.` };
+                default:
+                    return { kind: 'unknown', text: `Unexpected answer from web (${reply.status}); check time left.` };
+            }
+        }
+
+        const MESSAGE_ICONS = { ok: '✓', warn: '⚠', err: '✗', unknown: '?' };
+
+        /** One monitored user's card; built once, then updated in place so typing survives. */
+        class UserCard {
+            constructor(observation, canAdjust) {
+                this.obs = observation;
+                this.canAdjust = canAdjust;
+                this.pending = 0;
+                this.inflight = null; // {delta, started} while a request is out
+                this.message = null;
+
+                this.timestamp = el('div', { class: 'timestamp' });
+                this.big = el('div', { class: 'big' });
+                this.pendingLine = el('div', { class: 'pending' });
+                this.hero = el('div', { class: 'hero' });
+                this.messageBox = el('div');
+                this.stats = el('div', { class: 'stats small' });
+
+                const center = el('div', { class: 'center' },
+                    this.big, el('div', { class: 'stat-label' }, 'Left Today'));
+
+                this.root = el('div', { class: 'user-card' },
+                    el('div', { class: 'user-header' },
+                        el('div', { class: 'user-name' }, observation.user),
+                        el('div', { class: 'host-name' }, observation.host),
+                        this.timestamp),
+                    this.hero);
+
+                if (canAdjust) {
+                    this.minus = el('button', { class: 'round', title: 'Remove 15 minutes', onclick: () => this.step(-STEP_SECONDS) }, '−');
+                    this.plus = el('button', { class: 'round', title: 'Add 15 minutes', onclick: () => this.step(STEP_SECONDS) }, '+');
+                    this.typed = el('input', { type: 'number', step: '1', placeholder: '± min', 'aria-label': 'Minutes to add or remove' });
+                    this.typed.addEventListener('input', () => this.onTyped());
+                    this.typed.addEventListener('change', () => this.syncTyped());
+                    center.append(this.pendingLine, el('div', { class: 'typed' }, 'or type ', this.typed, ' min'));
+                    this.hero.append(this.minus, center, this.plus);
+
+                    this.apply = el('button', { class: 'btn primary', onclick: () => this.applyPending() }, 'Apply');
+                    this.reset = el('button', { class: 'btn', onclick: () => this.setPending(0) }, 'Reset');
+                    this.root.append(el('div', { class: 'actions' }, this.apply, this.reset), this.messageBox);
+                } else {
+                    this.hero.append(center);
+                }
+
+                this.root.append(this.stats);
+                this.update(observation);
+            }
+
+            update(observation, flash = false) {
+                this.obs = observation;
+                this.big.textContent = formatDuration(observation.left_day);
+                this.updateTimestamp();
+                const stat = (value, label) => el('div', { class: 'stat' },
+                    el('div', { class: 'stat-value' }, formatDuration(value)),
+                    el('div', { class: 'stat-label' }, label));
+                this.stats.replaceChildren(
+                    stat(observation.spent_day, 'Spent Today'),
+                    stat(observation.spent_week, 'Spent Week'),
+                    stat(observation.spent_month, 'Spent Month'),
+                    stat(observation.spent_balance, 'Balance'));
+                if (flash) {
+                    this.hero.classList.remove('flash');
+                    void this.hero.offsetWidth; // restart the animation
+                    this.hero.classList.add('flash');
+                }
+                if (this.canAdjust) this.renderControls();
+            }
+
+            updateTimestamp() {
+                this.timestamp.textContent = formatRelativeTime(this.obs.timestamp);
+                this.timestamp.title = new Date(this.obs.timestamp).toLocaleString();
+            }
+
+            step(seconds) {
+                this.setPending(this.pending + seconds);
+            }
+
+            setPending(seconds) {
+                this.pending = clampDelta(seconds);
+                this.syncTyped();
+                this.renderControls();
+            }
+
+            /** Typing ± minutes sets the pending change without rewriting what's being typed. */
+            onTyped() {
+                const minutes = Math.trunc(Number(this.typed.value));
+                this.pending = Number.isFinite(minutes) ? clampDelta(minutes * 60) : 0;
+                this.renderControls();
+            }
+
+            syncTyped() {
+                this.typed.value = this.pending ? String(this.pending / 60) : '';
+            }
+
+            renderControls() {
+                const p = this.pending;
+                const busy = this.inflight !== null;
+                this.pendingLine.className = `pending ${p > 0 ? 'add' : p < 0 ? 'remove' : ''}`;
+                this.pendingLine.textContent = p
+                    ? `${p > 0 ? '+' : '−'}${formatShort(Math.abs(p))} → about ${formatDuration(Math.max(0, this.obs.left_day + p))}`
+                    : '';
+                this.apply.textContent = p ? describeDelta(p, 'Add', 'Remove') : 'Apply';
+                this.apply.className = `btn ${p < 0 ? 'danger' : 'primary'}`;
+                this.apply.disabled = !p || busy;
+                this.reset.disabled = !p || busy;
+                for (const control of [this.minus, this.plus, this.typed]) control.disabled = busy;
+                this.renderMessage();
+            }
+
+            renderMessage() {
+                if (this.inflight) {
+                    const secs = Math.floor((Date.now() - this.inflight.started) / 1000);
+                    const verb = describeDelta(this.inflight.delta, 'Adding', 'Removing');
+                    this.messageBox.replaceChildren(el('div', { class: 'msg inflight' },
+                        el('span', { class: 'spin' }),
+                        el('span', {}, `${verb} for ${this.obs.user}… waiting for ${this.obs.host}${secs >= 2 ? ` (${secs}s)` : ''}`)));
+                    return;
+                }
+                const m = this.message;
+                if (!m) {
+                    this.messageBox.replaceChildren();
+                    return;
+                }
+                const text = el('span', {}, m.text);
+                if (m.before !== undefined) {
+                    text.append(`${formatDuration(m.before)} → `, el('b', {}, formatDuration(m.after)), m.suffix || '');
+                }
+                this.messageBox.replaceChildren(el('div', { class: `msg ${m.kind}` },
+                    MESSAGE_ICONS[m.kind], text,
+                    el('button', { class: 'dismiss', title: 'Dismiss', onclick: () => { this.message = null; this.renderMessage(); } }, '✕')));
+            }
+
+            async applyPending() {
+                const delta = this.pending;
+                if (!delta || this.inflight) return;
+                this.message = null;
+                this.inflight = { delta, started: Date.now() };
+                this.renderControls();
+                const ticker = setInterval(() => this.renderMessage(), 1000);
+
+                const result = await requestAdjustment(this.obs.host, this.obs.user, delta);
+
+                clearInterval(ticker);
+                this.inflight = null;
+                this.message = result;
+                // Keep the pending change only when it certainly wasn't made, so it can be retried
+                if (result.kind !== 'err') this.setPending(0);
+                if (result.observation) {
+                    this.update({ ...this.obs, ...result.observation, timestamp: new Date().toISOString() }, true);
+                } else {
+                    this.renderControls();
+                }
+            }
+        }
+
         class ScreenTimeMonitor {
             constructor() {
                 this.ws = null;
-                this.data = {};
+                this.cards = {};
+                this.canAdjust = false;
                 this.reconnectAttempts = 0;
                 this.maxReconnectAttempts = 5;
                 this.reconnectDelay = 1000;
-                
-                this.connect();
-                this.startPeriodicUpdate();
+
+                // Learn whether the viewer may adjust before any card is built
+                this.whoAmI().then(() => {
+                    this.connect();
+                    this.startPeriodicUpdate();
+                });
+            }
+
+            async whoAmI() {
+                try {
+                    const response = await fetch('/api/me');
+                    const me = response.ok ? await response.json() : {};
+                    this.canAdjust = me.adjuster === true;
+                } catch {
+                    this.canAdjust = false; // no controls when the call fails
+                }
             }
 
             connect() {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const wsUrl = `${protocol}//${window.location.host}/ws`;
-                
+
                 try {
                     this.ws = new WebSocket(wsUrl);
-                    
+
                     this.ws.onopen = () => {
                         console.log('WebSocket connected');
                         this.updateConnectionStatus(true);
                         this.reconnectAttempts = 0;
                     };
-                    
+
                     this.ws.onmessage = (event) => {
-                        const screenTimeEvent = JSON.parse(event.data);
-                        this.updateData(screenTimeEvent);
+                        this.updateData(JSON.parse(event.data));
                     };
-                    
+
                     this.ws.onclose = () => {
                         console.log('WebSocket disconnected');
                         this.updateConnectionStatus(false);
                         this.attemptReconnect();
                     };
-                    
+
                     this.ws.onerror = (error) => {
                         console.error('WebSocket error:', error);
                         this.updateConnectionStatus(false);
@@ -205,7 +615,7 @@
                 if (this.reconnectAttempts < this.maxReconnectAttempts) {
                     this.reconnectAttempts++;
                     console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-                    
+
                     setTimeout(() => {
                         this.connect();
                     }, this.reconnectDelay * this.reconnectAttempts);
@@ -227,105 +637,16 @@
 
             updateData(event) {
                 const key = `${event.host}:${event.user}`;
-                
-                this.data[key] = event;
-                
-                this.render();
+                const card = this.cards[key];
+                if (card) {
+                    card.update(event);
+                } else {
+                    const container = document.getElementById('user-container');
+                    if (Object.keys(this.cards).length === 0) container.replaceChildren();
+                    this.cards[key] = new UserCard(event, this.canAdjust);
+                    container.appendChild(this.cards[key].root);
+                }
                 this.updateLastUpdate();
-            }
-
-            render() {
-                const container = document.getElementById('user-container');
-                
-                if (Object.keys(this.data).length === 0) {
-                    container.innerHTML = '<div class="no-data">Waiting for screen time data...</div>';
-                    return;
-                }
-                
-                container.innerHTML = '';
-                
-                Object.values(this.data).forEach(userData => {
-                    const card = this.createUserCard(userData);
-                    container.appendChild(card);
-                });
-            }
-
-            createUserCard(userData) {
-                const card = document.createElement('div');
-                card.className = 'user-card';
-                
-                card.innerHTML = `
-                    <div class="user-header">
-                        <div class="user-name">${userData.user}</div>
-                        <div class="host-name">${userData.host}</div>
-                        <div class="timestamp" title="${new Date(userData.timestamp).toLocaleString()}">${this.formatRelativeTime(userData.timestamp)}</div>
-                    </div>
-                    <div class="stats">
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.left_day)}</div>
-                            <div class="stat-label">Left Today</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_day)}</div>
-                            <div class="stat-label">Spent Today</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_week)}</div>
-                            <div class="stat-label">Spent Week</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_month)}</div>
-                            <div class="stat-label">Spent Month</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">${this.formatDuration(userData.spent_balance)}</div>
-                            <div class="stat-label">Balance</div>
-                        </div>
-                    </div>
-                `;
-                
-                return card;
-            }
-
-            formatDuration(seconds) {
-                const isNegative = seconds < 0;
-                const absSeconds = Math.abs(seconds);
-                let result = '';
-
-                if (absSeconds < 60) {
-                    result = `${absSeconds}s`;
-                } else if (absSeconds < 3600) {
-                    const minutes = Math.floor(absSeconds / 60);
-                    const remainingSeconds = absSeconds % 60;
-                    result = `${minutes}m ${remainingSeconds}s`;
-                } else {
-                    const hours = Math.floor(absSeconds / 3600);
-                    const minutes = Math.floor((absSeconds % 3600) / 60);
-                    result = `${hours}h ${minutes}m`;
-                }
-
-                return isNegative ? `-${result}` : result;
-            }
-
-            formatRelativeTime(timestamp) {
-                const date = new Date(timestamp);
-                const now = new Date();
-                const diffSeconds = Math.floor((now - date) / 1000);
-
-                if (diffSeconds < 5) {
-                    return 'current';
-                } else if (diffSeconds < 60) {
-                    return `${diffSeconds}s ago`;
-                } else if (diffSeconds < 3600) {
-                    const mins = Math.floor(diffSeconds / 60);
-                    return `${mins}m ago`;
-                } else if (diffSeconds < 86400) {
-                    const hours = Math.floor(diffSeconds / 3600);
-                    return `${hours}h ago`;
-                } else {
-                    const days = Math.floor(diffSeconds / 86400);
-                    return `${days}d ago`;
-                }
             }
 
             updateLastUpdate() {
@@ -335,9 +656,7 @@
 
             startPeriodicUpdate() {
                 setInterval(() => {
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.render();
-                    }
+                    Object.values(this.cards).forEach(card => card.updateTimestamp());
                 }, 30000);
             }
         }

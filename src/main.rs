@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 use tower_http::services::ServeDir;
 
+mod adjust;
 mod auth;
 use auth::{AuthMode, CloudflareIdentity};
 
@@ -58,9 +59,12 @@ pub struct ScreenTimeEvent {
     pub spent_day: i64,
 }
 
+/// Latest observations per `host:user`, as held by web.
+pub type Observations = Arc<RwLock<HashMap<String, Vec<ScreenTimeEvent>>>>;
+
 #[derive(Clone)]
 pub struct AppState {
-    pub screen_time_data: Arc<RwLock<HashMap<String, Vec<ScreenTimeEvent>>>>,
+    pub screen_time_data: Observations,
     pub event_sender: broadcast::Sender<ScreenTimeEvent>,
     pub jetstream: jetstream::Context,
 }
@@ -98,7 +102,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connecting to NATS at: {}", nats_url);
     let nats_client = async_nats::connect(&nats_url).await?;
-    let jetstream = jetstream::new(nats_client);
+    let jetstream = jetstream::new(nats_client.clone());
 
     let (event_sender, _) = broadcast::channel::<ScreenTimeEvent>(1000);
 
@@ -119,6 +123,11 @@ async fn main() -> Result<()> {
         .route("/api/screentime", get(get_screentime_data))
         .route("/api/me", get(me))
         .nest_service("/static", get_service(ServeDir::new("static")));
+    let adjust_state = adjust::AdjustState {
+        observations: app_state.screen_time_data.clone(),
+        send_request: adjust::nats_sender(nats_client),
+    };
+    let app = app.merge(adjust::routes().with_state(adjust_state));
     let app = with_auth(app, auth_mode).with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
