@@ -1,3 +1,5 @@
+> **Moved.** screentime-web now lives in [thomaschrstnsn/screentime](https://github.com/thomaschrstnsn/screentime) under `src/web`, together with the collector. This repo is archived.
+
 # Screen Time Monitor
 
 A real-time web dashboard for monitoring screen time usage across multiple users and hosts. This application consumes screen time events from a NATS JetStream server and provides a live view of usage statistics via a WebSocket-enabled web interface.
